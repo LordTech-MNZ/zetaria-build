@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<title>Zetaria</title>
+<style>
+  :root { color-scheme: dark; --bg:#080118; --card:#1b1530; --ac:#a678ff; --tx:#f1ebff; --soft:#a78bca; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;
+         background: radial-gradient(circle at 80% 10%, #34105e 0%, var(--bg) 60%); color:var(--tx);
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { width:100%; max-width:420px; background:var(--card); border-radius:20px; padding:28px 22px; text-align:center;
+         box-shadow:0 10px 40px rgba(0,0,0,.45); }
+  h1 { margin:0 0 6px; font-size:28px; background:linear-gradient(90deg,#8e5cf0,#e0b7ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  p { color:var(--soft); line-height:1.5; margin:10px 0; }
+  .btn { display:block; width:100%; margin:12px 0 0; padding:14px 16px; border-radius:14px; border:0; font-size:16px; font-weight:600;
+         text-decoration:none; cursor:pointer; }
+  .primary { background:var(--ac); color:#1a0833; }
+  .ghost { background:transparent; color:var(--tx); border:1px solid #4b3a78; }
+  .small { font-size:12.5px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Zetaria</h1>
+  <p id="msg">Mensajería privada del Reino Soberano.</p>
+
+  <a id="open" class="btn primary" href="#" hidden>Abrir en Zetaria</a>
+  <a id="apk" class="btn ghost" href="https://github.com/0rlanther/zetaria-build/releases/latest/download/Zetaria.apk">Descargar Zetaria (Android)</a>
+  <button id="copy" class="btn ghost" type="button" hidden>Copiar enlace para pegarlo en Zetaria</button>
+
+  <p id="help" class="small" hidden>
+    ¿Aún no tienes Zetaria? Descárgala, instálala y vuelve a tocar este enlace.
+    Los datos de la conexión van tras el símbolo # de la dirección: tu navegador no se los envía a GitHub.
+  </p>
+</main>
+
+<script>
+  // Si cambias el nombre del repositorio o usas un dominio propio, ajusta esta ruta base
+  // (y ZETARIA_LINK_BASE en el workflow para que la app genere enlaces que apunten aquí).
+  var BASE_PATH = "/zetaria-build";
+
+  var path = location.pathname;
+  if (path.indexOf(BASE_PATH) === 0) path = path.slice(BASE_PATH.length);
+  path = path.replace(/^\/+/, "");
+  var hash = location.hash;
+  var hasLink = path.length > 0 && path !== "index.html" && path !== "404.html" && hash.length > 1;
+
+  if (hasLink) {
+    var appUrl = "zetaria:/" + path + hash;
+    var open = document.getElementById("open");
+    open.href = appUrl;
+    open.hidden = false;
+    document.getElementById("copy").hidden = false;
+    document.getElementById("help").hidden = false;
+    document.getElementById("msg").textContent = "Te han enviado un enlace de Zetaria.";
+
+    document.getElementById("copy").addEventListener("click", function () {
+      var done = function () { document.getElementById("copy").textContent = "Enlace copiado"; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(location.href).then(done, function () { window.prompt("Copia este enlace:", location.href); });
+      } else {
+        window.prompt("Copia este enlace:", location.href);
+      }
+    });
+
+    // Intento automático; si el navegador lo bloquea, queda el botón.
+    setTimeout(function () { location.href = appUrl; }, 400);
+  }
+</script>
+</body>
+</html>
