@@ -6,11 +6,25 @@
 <meta name="robots" content="noindex">
 <meta name="referrer" content="no-referrer">
 <title>Zetaria</title>
+<meta name="description" content="Fuiste invitado al Reino Soberano de Zetaria por medio de un enlace que conecta el mundo terrenal y virtual en uno solo.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Zetaria">
+<meta property="og:title" content="Zetaria — Reino Soberano">
+<meta property="og:description" content="Fuiste invitado al Reino Soberano de Zetaria por medio de un enlace que conecta el mundo terrenal y virtual en uno solo.">
+<meta property="og:image" content="https://lordtech-mnz.github.io/zetaria-build/og-flag.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Zetaria — Reino Soberano">
+<meta name="twitter:description" content="Fuiste invitado al Reino Soberano de Zetaria por medio de un enlace que conecta el mundo terrenal y virtual en uno solo.">
+<meta name="twitter:image" content="https://lordtech-mnz.github.io/zetaria-build/og-flag.jpg">
+<link rel="icon" href="/zetaria-build/mnz.png">
 <style>
-  :root { color-scheme: dark; --bg:#080118; --card:#1b1530; --ac:#a678ff; --tx:#f1ebff; --soft:#a78bca; }
+  :root { color-scheme: dark; --bg:#05010f; --card:#1b1530; --ac:#a678ff; --tx:#f1ebff; --soft:#a78bca; }
   * { box-sizing: border-box; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;
-         background: radial-gradient(circle at 80% 10%, #34105e 0%, var(--bg) 60%); color:var(--tx);
+         background: radial-gradient(ellipse at 20% 15%, #4a1a8c 0%, transparent 55%), radial-gradient(ellipse at 85% 70%, #5b1f9e 0%, transparent 50%), radial-gradient(circle at 50% 50%, #1c0640 0%, var(--bg) 85%); background-attachment: fixed; color:var(--tx);
          font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   main { width:100%; max-width:420px; background:var(--card); border-radius:20px; padding:28px 22px; text-align:center;
          box-shadow:0 10px 40px rgba(0,0,0,.45); }
@@ -21,11 +35,20 @@
   .primary { background:var(--ac); color:#1a0833; }
   .ghost { background:transparent; color:var(--tx); border:1px solid #4b3a78; }
   .small { font-size:12.5px; }
+  .stars, .stars::before, .stars::after { position:fixed; top:0; left:0; width:2px; height:2px; border-radius:50%; background:transparent; pointer-events:none; z-index:0; }
+  .stars { box-shadow:663px 1941px 0 #fff,808px 1333px 0 #fff,148px 1681px 0 #cdb4ff,192px 748px 0 #cdb4ff,118px 1863px 0 #cdb4ff,439px 76px 0 #fff,888px 856px 0 #fff,492px 185px 0 #cdb4ff,869px 121px 0 #cdb4ff,253px 1940px 0 #fff,1291px 1284px 0 #cdb4ff,1940px 126px 0 #cdb4ff,1199px 812px 0 #fff,1999px 452px 0 #fff,1140px 1758px 0 #fff,593px 858px 0 #fff,1107px 241px 0 #cdb4ff,631px 1147px 0 #cdb4ff,370px 211px 0 #cdb4ff,1169px 1308px 0 #fff,762px 199px 0 #cdb4ff,1458px 128px 0 #cdb4ff,122px 1267px 0 #fff,1016px 1393px 0 #cdb4ff,875px 1591px 0 #e9dcff,953px 1199px 0 #e9dcff,740px 613px 0 #fff,1626px 368px 0 #cdb4ff,1597px 499px 0 #fff,1176px 614px 0 #cdb4ff,1013px 1792px 0 #e9dcff,1493px 919px 0 #e9dcff,1247px 149px 0 #fff,1048px 856px 0 #fff,1550px 700px 0 #fff,1911px 1001px 0 #e9dcff,80px 1970px 0 #cdb4ff,158px 1565px 0 #cdb4ff,1173px 1616px 0 #e9dcff,696px 1423px 0 #e9dcff,1217px 1017px 0 #cdb4ff,1632px 934px 0 #fff,1720px 191px 0 #e9dcff,970px 1427px 0 #cdb4ff,133px 124px 0 #cdb4ff,1436px 634px 0 #cdb4ff,1183px 1395px 0 #e9dcff,582px 1467px 0 #e9dcff,1816px 1369px 0 #e9dcff,46px 1926px 0 #e9dcff,727px 344px 0 #cdb4ff,239px 1011px 0 #fff,446px 1573px 0 #e9dcff,264px 1512px 0 #fff,814px 800px 0 #e9dcff,165px 340px 0 #e9dcff,822px 1125px 0 #e9dcff,1809px 280px 0 #e9dcff,1769px 1126px 0 #e9dcff,1446px 850px 0 #e9dcff,1398px 1810px 0 #e9dcff,1961px 472px 0 #fff,169px 360px 0 #fff,475px 1348px 0 #fff,24px 993px 0 #cdb4ff,373px 538px 0 #e9dcff,8px 298px 0 #e9dcff,1094px 756px 0 #cdb4ff,1159px 652px 0 #fff,1414px 1759px 0 #cdb4ff,1946px 1264px 0 #cdb4ff,1384px 1515px 0 #fff,935px 1842px 0 #cdb4ff,1634px 1145px 0 #e9dcff,815px 817px 0 #e9dcff,212px 986px 0 #cdb4ff,820px 127px 0 #fff,137px 427px 0 #e9dcff,332px 225px 0 #e9dcff,1230px 107px 0 #fff,0px 1160px 0 #fff,1098px 207px 0 #e9dcff,1256px 52px 0 #fff,1790px 425px 0 #cdb4ff,770px 304px 0 #cdb4ff,516px 1956px 0 #e9dcff,1233px 745px 0 #e9dcff,251px 236px 0 #e9dcff,954px 983px 0 #e9dcff,638px 175px 0 #fff,209px 1535px 0 #e9dcff,1516px 542px 0 #e9dcff,1697px 1417px 0 #fff,1057px 47px 0 #fff,1947px 1949px 0 #cdb4ff,740px 300px 0 #cdb4ff,1112px 1872px 0 #fff,1552px 1081px 0 #e9dcff,1316px 1768px 0 #fff,1425px 1731px 0 #e9dcff,1061px 751px 0 #fff,728px 1580px 0 #fff,1090px 1109px 0 #cdb4ff,675px 1303px 0 #fff,1255px 1661px 0 #fff,1650px 490px 0 #e9dcff,1515px 1645px 0 #fff,409px 1060px 0 #e9dcff,728px 1497px 0 #fff,57px 1618px 0 #e9dcff,967px 530px 0 #fff,1418px 1239px 0 #e9dcff,915px 1655px 0 #cdb4ff,715px 1955px 0 #e9dcff,164px 451px 0 #fff,464px 962px 0 #fff,691px 418px 0 #e9dcff,1278px 1843px 0 #cdb4ff,1721px 3px 0 #e9dcff,1862px 1337px 0 #e9dcff,1637px 1317px 0 #fff,1709px 1352px 0 #fff,1863px 795px 0 #cdb4ff,1536px 408px 0 #e9dcff,1820px 365px 0 #e9dcff,1616px 1302px 0 #e9dcff,177px 1640px 0 #cdb4ff,810px 948px 0 #e9dcff,1522px 1939px 0 #fff,1484px 325px 0 #fff,260px 56px 0 #fff,1209px 1853px 0 #e9dcff,1651px 1343px 0 #fff,1252px 1692px 0 #cdb4ff,971px 1346px 0 #e9dcff,319px 1123px 0 #cdb4ff,268px 43px 0 #fff,1637px 1988px 0 #cdb4ff,1330px 210px 0 #cdb4ff,1534px 1912px 0 #fff; }
+  .stars::before { content:""; width:3px; height:3px; box-shadow:888px 1785px 0 #fff,1691px 1789px 0 #fff,57px 515px 0 #fff,599px 1026px 0 #fff,1564px 1201px 0 #f3e8ff,531px 1114px 0 #f3e8ff,1708px 268px 0 #fff,1863px 1515px 0 #f3e8ff,1838px 938px 0 #f3e8ff,1693px 1879px 0 #fff,1089px 310px 0 #fff,1787px 901px 0 #fff,1246px 8px 0 #fff,352px 289px 0 #f3e8ff,1267px 1485px 0 #fff,1139px 126px 0 #f3e8ff,1397px 1061px 0 #f3e8ff,1606px 1590px 0 #fff,1808px 1147px 0 #fff,508px 391px 0 #f3e8ff,86px 1581px 0 #fff,1039px 926px 0 #fff,1556px 1830px 0 #fff,907px 666px 0 #fff,1418px 567px 0 #f3e8ff,1040px 1092px 0 #f3e8ff,1039px 1928px 0 #fff,1431px 1071px 0 #f3e8ff,1889px 1145px 0 #fff,1720px 916px 0 #fff,853px 249px 0 #f3e8ff,905px 647px 0 #fff,1374px 492px 0 #f3e8ff,149px 435px 0 #f3e8ff,1605px 250px 0 #fff,1924px 1466px 0 #f3e8ff,292px 518px 0 #fff,1981px 957px 0 #fff,1529px 1950px 0 #fff,815px 1812px 0 #f3e8ff,333px 1367px 0 #fff,330px 1446px 0 #f3e8ff,1055px 827px 0 #f3e8ff,862px 400px 0 #f3e8ff,652px 188px 0 #f3e8ff,39px 692px 0 #f3e8ff,902px 1440px 0 #fff,787px 678px 0 #f3e8ff,1049px 1967px 0 #fff,231px 1881px 0 #fff,1990px 1794px 0 #fff,172px 543px 0 #f3e8ff,81px 1855px 0 #fff,553px 1547px 0 #fff,1678px 864px 0 #f3e8ff,831px 305px 0 #f3e8ff,1434px 669px 0 #fff,571px 117px 0 #fff,871px 1833px 0 #fff,550px 1921px 0 #fff; animation:tw 4s ease-in-out infinite alternate; }
+  .stars::after { content:""; width:3px; height:3px; box-shadow:1299px 181px 0 #fff,171px 1245px 0 #fff,136px 541px 0 #fff,929px 23px 0 #fff,1132px 855px 0 #fff,1273px 264px 0 #fff,1079px 1453px 0 #fff,1921px 224px 0 #fff,536px 103px 0 #fff,413px 1909px 0 #fff,1287px 624px 0 #fff,593px 912px 0 #fff,554px 710px 0 #fff,512px 75px 0 #fff,37px 1501px 0 #fff,1053px 972px 0 #fff,1914px 915px 0 #fff,1348px 1677px 0 #fff,1344px 1013px 0 #fff,1987px 1037px 0 #fff,1408px 440px 0 #fff,701px 406px 0 #fff,828px 711px 0 #fff,1714px 265px 0 #fff,144px 1280px 0 #fff; animation:tw 6s ease-in-out infinite alternate-reverse; }
+  @keyframes tw { from { opacity:.35; } to { opacity:1; } }
+  main { position:relative; z-index:1; }
+  .logo { display:block; width:130px; height:130px; margin:0 auto 14px; object-fit:contain; filter:drop-shadow(0 0 18px rgba(166,120,255,.55)); }
   [hidden] { display:none !important; }
 </style>
 </head>
 <body>
+<div class="stars" aria-hidden="true"></div>
 <main>
+  <img class="logo" src="/zetaria-build/mnz.png" alt="MNZ" width="130" height="130">
   <h1>Zetaria</h1>
   <p id="msg">Mensajería privada del Reino Soberano.</p>
 
@@ -57,7 +80,7 @@
     open.hidden = false;
     document.getElementById("copy").hidden = false;
     document.getElementById("help").hidden = false;
-    document.getElementById("msg").textContent = "Te han enviado un enlace de Zetaria.";
+    document.getElementById("msg").textContent = "Fuiste invitado al Reino Soberano de Zetaria por medio de un enlace que conecta el mundo terrenal y virtual en uno solo, ingresa a mi app para ver el enlace del usuario o grupo";
 
     document.getElementById("copy").addEventListener("click", function () {
       var done = function () { document.getElementById("copy").textContent = "Enlace copiado"; };
