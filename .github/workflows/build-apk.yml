@@ -1,0 +1,472 @@
+name: Build Zetaria APK
+
+on:
+  # Cada vez que subes cambios a main se compila y se publica una Release nueva;
+  # las apps instaladas la detectan y ofrecen actualizar.
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/workflows/dump-source.yml"
+      - ".github/workflows/test-keystore.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de SimpleX a usar como base (debe tener APK en sus releases)"
+        default: "v7.0.3"
+        required: true
+      apk_url:
+        description: "URL alternativa del APK oficial (opcional, solo si falla la de GitHub)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # necesario para publicar la Release con el APK
+
+concurrency:
+  group: zetaria-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Tu repo (branding + scripts)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Código fuente de SimpleX en el tag elegido
+        uses: actions/checkout@v4
+        with:
+          repository: simplex-chat/simplex-chat
+          ref: ${{ inputs.tag || 'v7.0.3' }}
+          path: src
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Aplicar marca Zetaria
+        run: |
+          pip install pillow
+          SCRIPT=$(find overlay -name rebrand.sh | head -1)
+          echo "Usando: $SCRIPT"
+          bash "$SCRIPT" src/apps/multiplatform
+
+      - name: Quitar banner de crowdfunding y su espacio
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name remove_banner_space.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Audios en el chat (botón Audio + reproductor)
+        # Si el código de SimpleX no coincide, el script no modifica nada y el build sigue sin audio.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name audio_files.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Encuestas (botón Encuesta + tarjeta con votos)
+        # Si el código de SimpleX no coincide, el script no modifica nada y el build sigue sin encuestas.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name polls.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Stickers (botón Stickers + panel + importar)
+        # Necesita el paso de Encuestas. Si algo no coincide, no modifica nada y el build sigue sin stickers.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name stickers.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: GIFs (botón GIFs + buscador KLIPY)
+        # Necesita el paso de Stickers. Si algo no coincide, no modifica nada y el build sigue sin GIFs.
+        # El secreto KLIPY_API_KEY es OPCIONAL: si no existe, el usuario pega su clave dentro de la app.
+        continue-on-error: true
+        env:
+          KLIPY_API_KEY: ${{ secrets.KLIPY_API_KEY }}
+        run: |
+          SCRIPT=$(find overlay -name gifs.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Esteganografía y códigos (13 herramientas)
+        # Necesita el paso de GIFs. Si algo no coincide, no modifica nada y el build sigue sin esta función.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name stego.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Interfaz fluida (transiciones estilo Telegram)
+        # Solo animaciones: no mueve ningún botón ni menú. Cada mejora se omite sola si no encaja.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name uifx.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Actualizaciones automáticas (aviso + botón Actualizar)
+        # Sin continue-on-error a propósito: una compilación sin actualizador no podría actualizarse sola después.
+        env:
+          ZETARIA_BUILD_NUMBER: ${{ github.run_number }}
+          ZETARIA_REPO: ${{ github.repository }}
+        run: |
+          SCRIPT=$(find overlay -name updater.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Enlaces propios de Zetaria (en vez de simplex.chat)
+        # Sin continue-on-error a propósito: si solo se aplicara una mitad, los enlaces quedarían inservibles.
+        env:
+          ZETARIA_REPO: ${{ github.repository }}
+        run: |
+          SCRIPT=$(find overlay -name zlinks.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Limitar a arm64 (solo tenemos el núcleo nativo de arm64)
+        run: |
+          sed -i 's/include("arm64-v8a", "armeabi-v7a")/include("arm64-v8a")/' src/apps/multiplatform/android/build.gradle.kts
+          grep -n 'include("' src/apps/multiplatform/android/build.gradle.kts
+
+      # ---------------------------------------------------------------------
+      # El APK oficial (unos 100 MB) se guarda en caché: así no se vuelve a
+      # descargar en cada compilación y un corte de red de GitHub no obliga a
+      # empezar de cero.
+      # ---------------------------------------------------------------------
+      - name: Restaurar APK oficial (caché)
+        id: apk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: official.apk
+          key: simplex-apk-v2-${{ inputs.tag || 'v7.0.3' }}
+
+      - name: Núcleo nativo (Haskell) desde el APK oficial del mismo tag
+        env:
+          TAG: ${{ inputs.tag || 'v7.0.3' }}
+          APK_URL: ${{ inputs.apk_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GitHub ejecuta los "run" con bash -e; aquí se desactiva para poder
+          # comprobar los fallos a mano (reintentos) sin abortar el paso.
+          set +e
+          set -uo pipefail
+          ASSET="simplex-aarch64.apk"
+          URL="https://github.com/simplex-chat/simplex-chat/releases/download/${TAG}/${ASSET}"
+          FUENTES=()
+          if [ -n "${APK_URL:-}" ]; then FUENTES+=("$APK_URL"); fi
+          FUENTES+=("$URL")
+
+          # GitHub a veces corta la conexión a mitad de la descarga (curl: (56)).
+          # Se reintenta con HTTP/1.1 y tiempos límite, y si aun así falla se usa la API con gh.
+          valido() {
+            [ -s official.apk ] && unzip -tq official.apk >/dev/null 2>&1 \
+              && unzip -l official.apk | grep -q 'lib/arm64-v8a/libsimplex.so'
+          }
+
+          bajado=0
+          if valido; then
+            echo "APK oficial recuperado de la caché y verificado."
+            bajado=1
+          fi
+
+          for fuente in "${FUENTES[@]}"; do
+            [ "$bajado" -eq 1 ] && break
+            echo "== Fuente: $fuente =="
+            for intento in 1 2 3; do
+              [ "$bajado" -eq 1 ] && break
+              echo "== Descarga del APK oficial (intento $intento de 3) =="
+              rm -f official.apk
+              if curl -fL --http1.1 --retry 8 --retry-delay 5 --retry-all-errors \
+                   --connect-timeout 30 --max-time 240 -o official.apk "$fuente" && valido; then
+                bajado=1
+              else
+                echo "::warning::Fallo de red al descargar el APK oficial (intento $intento)."
+                sleep $((intento * 10))
+              fi
+            done
+          done
+
+          if [ "$bajado" -ne 1 ] && command -v gh >/dev/null 2>&1; then
+            echo "== Reintento con la API de GitHub (gh release download) =="
+            rm -f official.apk "$ASSET"
+            gh release download "$TAG" --repo simplex-chat/simplex-chat \
+              --pattern "*aarch64*.apk" --dir . --clobber || true
+            [ -f "$ASSET" ] && mv -f "$ASSET" official.apk
+            if valido; then bajado=1; fi
+          fi
+
+          if [ "$bajado" -ne 1 ]; then
+            echo "No se pudo descargar el APK oficial de ${TAG} tras varios intentos."
+            echo "Suele ser un corte temporal de GitHub: vuelve a lanzar el workflow."
+            exit 1
+          fi
+
+          LIBS=src/apps/multiplatform/common/src/commonMain/cpp/android/libs/arm64-v8a
+          mkdir -p "$LIBS"
+          unzip -o -j official.apk lib/arm64-v8a/libsimplex.so lib/arm64-v8a/libsupport.so -d "$LIBS"
+          ls -la "$LIBS"
+          if [ ! -f "$LIBS/libsimplex.so" ] || [ ! -f "$LIBS/libsupport.so" ]; then
+            echo "El APK oficial no contiene las librerías esperadas."
+            exit 1
+          fi
+
+      - name: Guardar APK oficial (caché)
+        if: steps.apk-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: official.apk
+          key: simplex-apk-v2-${{ inputs.tag || 'v7.0.3' }}
+
+      - name: Preparar SDK/NDK
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses >/dev/null || true
+          for intento in 1 2 3; do
+            if "$SDKM" "ndk;23.1.7779620" "cmake;3.22.1" "platforms;android-35"; then
+              break
+            fi
+            echo "::warning::sdkmanager falló (intento $intento); reintentando en 15 s…"
+            sleep 15
+          done
+          if [ ! -d "$ANDROID_HOME/ndk/23.1.7779620" ]; then
+            echo "No se pudo instalar el NDK 23.1.7779620. Vuelve a lanzar el workflow."
+            exit 1
+          fi
+          ls "$ANDROID_HOME/ndk"
+
+      # ---------------------------------------------------------------------
+      # La distribución de Gradle (unos 130 MB desde services.gradle.org) se
+      # descarga aquí con reintentos y se guarda en caché. Si se consigue, se
+      # llama directamente a ese Gradle y no se depende del wrapper, que se
+      # queda esperando y muere con "Read timed out" cuando la red va mal.
+      # ---------------------------------------------------------------------
+      - name: Detectar versión de Gradle
+        id: gradle-ver
+        working-directory: src/apps/multiplatform
+        run: |
+          set +e
+          PROPS=gradle/wrapper/gradle-wrapper.properties
+          URL=$(grep -E '^distributionUrl=' "$PROPS" | head -1 | cut -d'=' -f2- | sed 's/\\//g')
+          VER=$(basename "$URL" | sed -E 's/^gradle-([0-9][0-9.]*)-.*$/\1/')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Gradle detectado: '$VER' desde $URL"
+
+      - name: Restaurar Gradle (caché)
+        id: gradle-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/gradle-dist
+          key: gradle-dist-${{ steps.gradle-ver.outputs.version }}
+
+      - name: Instalar Gradle (con reintentos)
+        env:
+          URL: ${{ steps.gradle-ver.outputs.url }}
+          VER: ${{ steps.gradle-ver.outputs.version }}
+        run: |
+          set +e
+          set -uo pipefail
+          if [ -z "${VER:-}" ] || [ -z "${URL:-}" ]; then
+            echo "::warning::No se pudo detectar la versión de Gradle; se usará ./gradlew."
+            exit 0
+          fi
+          DEST="$GITHUB_WORKSPACE/gradle-dist"
+          if [ -x "$DEST/gradle-$VER/bin/gradle" ] \
+             && "$DEST/gradle-$VER/bin/gradle" --version >/dev/null 2>&1; then
+            echo "Gradle $VER ya disponible (caché) y funcionando."
+            exit 0
+          fi
+          for intento in 1 2 3 4; do
+            echo "== Descarga de Gradle $VER (intento $intento de 4) =="
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+            if curl -fL --http1.1 --retry 8 --retry-delay 5 --retry-all-errors \
+                 --connect-timeout 30 --max-time 300 -o "$DEST/gradle.zip" "$URL" \
+               && unzip -q "$DEST/gradle.zip" -d "$DEST" \
+               && [ -x "$DEST/gradle-$VER/bin/gradle" ] \
+               && "$DEST/gradle-$VER/bin/gradle" --version >/dev/null 2>&1; then
+              rm -f "$DEST/gradle.zip"
+              echo "Gradle $VER instalado y verificado."
+              exit 0
+            fi
+            echo "::warning::No se pudo descargar Gradle (intento $intento)."
+            sleep $((intento * 10))
+          done
+          echo "No se pudo descargar Gradle $VER. Vuelve a lanzar el workflow."
+          exit 1
+
+      - name: Guardar Gradle (caché)
+        if: steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/gradle-dist
+          key: gradle-dist-${{ steps.gradle-ver.outputs.version }}
+
+      # ---------------------------------------------------------------------
+      # Maven Central a veces redirige algunas descargas a GitHub y esas
+      # conexiones se cortan ("Read timed out"). Se ponen dos espejos completos
+      # de Maven Central justo después de google(); si un artefacto no está en
+      # ellos, Gradle sigue con mavenCentral() como siempre.
+      # ---------------------------------------------------------------------
+      - name: Espejos rápidos para las dependencias (Maven Central)
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("src/apps/multiplatform/build.gradle.kts")
+          s = p.read_text(encoding="utf-8")
+          after_google = "allprojects {\n    repositories {\n        google()\n"
+          after_repos = "allprojects {\n    repositories {\n"
+          mirrors = (
+              '        maven("https://maven-central.storage-download.googleapis.com/maven2/")\n'
+              '        maven("https://maven.aliyun.com/repository/central")\n'
+          )
+          if "storage-download.googleapis.com" in s:
+              print("Los espejos ya estaban aplicados.")
+          elif after_google in s:
+              p.write_text(s.replace(after_google, after_google + mirrors, 1), encoding="utf-8")
+              print("Espejos de Maven Central añadidos justo después de google().")
+          elif after_repos in s:
+              p.write_text(s.replace(after_repos, after_repos + mirrors, 1), encoding="utf-8")
+              print("Espejos de Maven Central añadidos al principio de repositories.")
+          else:
+              print("Aviso: no se encontró el ancla de 'repositories'; no se modificó nada.")
+          PY
+
+      # ---------------------------------------------------------------------
+      # Caché de dependencias de Gradle: tras la primera compilación (aunque
+      # falle a medias) las siguientes ya no bajan casi nada de red.
+      # ---------------------------------------------------------------------
+      - name: Restaurar dependencias de Gradle (caché)
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: "gradle-deps-v1-${{ inputs.tag || 'v7.0.3' }}-${{ hashFiles('src/apps/multiplatform/**/*.gradle.kts', 'src/apps/multiplatform/*.gradle.kts', 'src/apps/multiplatform/gradle.properties', 'src/apps/multiplatform/gradle/wrapper/gradle-wrapper.properties', 'overlay/.github/workflows/*.py') }}"
+
+      - name: Compilar (solo arm64)
+        working-directory: src/apps/multiplatform
+        run: |
+          set -o pipefail
+          INIT=""
+          if [ -f "$GITHUB_WORKSPACE/zetaria-zxing.init.gradle" ]; then
+            INIT="-I $GITHUB_WORKSPACE/zetaria-zxing.init.gradle"
+            echo "Usando script de inicio para añadir ZXing"
+          fi
+          VER="${{ steps.gradle-ver.outputs.version }}"
+          GRADLE_BIN="$GITHUB_WORKSPACE/gradle-dist/gradle-$VER/bin/gradle"
+          if [ -n "$VER" ] && [ -x "$GRADLE_BIN" ]; then
+            echo "Usando Gradle $VER instalado directamente (sin wrapper)"
+            CMD="$GRADLE_BIN"
+          else
+            echo "Usando ./gradlew"
+            CMD="./gradlew"
+          fi
+
+          compilar() {
+            "$CMD" assembleFossRelease --no-daemon --stacktrace $INIT \
+              -Dorg.gradle.jvmargs="-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
+              -Dorg.gradle.internal.repository.max.retries=8 \
+              -Dorg.gradle.internal.repository.initial.backoff=3000 \
+              -Dorg.gradle.internal.http.connectionTimeout=60000 \
+              -Dorg.gradle.internal.http.socketTimeout=180000 \
+              2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          }
+
+          if compilar; then
+            exit 0
+          fi
+          if grep -qE "Read timed out|Could not GET|Could not HEAD|Could not download|Connection reset|SocketTimeoutException|UnknownHostException|Could not resolve all (files|dependencies)" "$GITHUB_WORKSPACE/build.log"; then
+            echo "::warning::La compilación falló por la red; se reintenta una vez (lo ya descargado sigue en la caché de Gradle)."
+            sleep 20
+            if compilar; then
+              exit 0
+            fi
+          else
+            echo "La compilación falló por un error del código o de configuración, no de red."
+          fi
+          exit 1
+
+      - name: Guardar dependencias de Gradle (caché)
+        if: always() && steps.deps-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: "gradle-deps-v1-${{ inputs.tag || 'v7.0.3' }}-${{ hashFiles('src/apps/multiplatform/**/*.gradle.kts', 'src/apps/multiplatform/*.gradle.kts', 'src/apps/multiplatform/gradle.properties', 'src/apps/multiplatform/gradle/wrapper/gradle-wrapper.properties', 'overlay/.github/workflows/*.py') }}"
+
+      - name: Causa del error (solo si falla)
+        if: failure()
+        run: |
+          echo "=== Errores del compilador Kotlin (líneas e:) ==="
+          grep -n "^e: " build.log | head -60 || true
+          echo "=== Líneas clave del error ==="
+          grep -n "Caused by\|OutOfMemory\|No space\|Exception:\|What went wrong" -A3 build.log | head -80
+
+      - name: Firmar APK
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(find src/apps/multiplatform/android/build/outputs/apk -name "*arm64*release*.apk" | head -1)
+          [ -n "$UNSIGNED" ] || { find src/apps/multiplatform/android/build/outputs -name "*.apk"; echo "No se encontró APK arm64"; exit 1; }
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > zetaria.jks; PASS="$KEYSTORE_PASS"
+          else
+            echo "::warning::Sin keystore propio: se usa una clave temporal. Las actualizaciones futuras exigirán la misma clave."
+            PASS=zetaria-temp-pass
+            keytool -genkeypair -keystore zetaria.jks -alias zetaria -keyalg RSA -keysize 4096 \
+              -validity 36500 -storepass "$PASS" -keypass "$PASS" -dname "CN=Zetaria"
+          fi
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
+          "$BT/apksigner" sign --ks zetaria.jks --ks-pass pass:"$PASS" --out Zetaria.apk aligned.apk
+          "$BT/apksigner" verify Zetaria.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zetaria-apk
+          path: Zetaria.apk
+
+      # ---------------------------------------------------------------------
+      # Release con el APK: es lo que consultan las apps instaladas.
+      # Tag "zetaria-bNN" (NN = número de ejecución): la app compara ese número con el suyo.
+      # ---------------------------------------------------------------------
+      - name: Publicar Release (para las actualizaciones de la app)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          BUILD: ${{ github.run_number }}
+          SIMPLEX_TAG: ${{ inputs.tag || 'v7.0.3' }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Sin keystore propia no se publica Release: Android rechazaría la actualización por firma distinta."
+            exit 1
+          fi
+          TAG="zetaria-b${BUILD}"
+          {
+            echo "Compilación #${BUILD} (base SimpleX ${SIMPLEX_TAG})"
+            echo
+            if [ -n "${COMMIT_MSG:-}" ]; then printf '%s\n' "$COMMIT_MSG"; else echo "Compilación manual."; fi
+          } > notes.md
+          gh release create "$TAG" Zetaria.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Zetaria #${BUILD}" \
+            --notes-file notes.md \
+            --latest
+          echo "Release publicada: $TAG"
