@@ -25,7 +25,7 @@ here = pathlib.Path(__file__).parent
 tpl = here / "templates" / "updater"
 
 build = os.environ.get("ZETARIA_BUILD_NUMBER", "0").strip() or "0"
-repo = os.environ.get("ZETARIA_REPO", "0rlanther/zetaria-build").strip()
+repo = os.environ.get("ZETARIA_REPO", "LordTech-MNZ/Zetaria").strip()
 if not re.fullmatch(r"\d+", build):
     sys.exit(f"ZETARIA_BUILD_NUMBER inválido: {build!r}")
 if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
