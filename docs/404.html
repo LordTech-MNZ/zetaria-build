@@ -80,10 +80,11 @@
   path = path.replace(/^\/+/, "");
   if (path === "index.html" || path === "404.html") path = "";
   var hash = location.hash;
-  // Formato nuevo:   /zetaria-build/#contact#/?v=...   (todo tras el primer #; la ruta es la raíz -> HTTP 200 -> vista previa)
-  // Formato antiguo: /zetaria-build/contact#/?v=...    (ruta + #; se sigue aceptando)
+  // Formato actual:   /zetaria-build/#contact~/?v=...  y  /zetaria-build/#h~smp18.simplex.im/a~CLAVE
+  //                   (un solo #; la ruta es la raíz -> HTTP 200 -> vista previa. Messenger no da vista previa con un 2.º #)
+  // Formatos previos: /zetaria-build/#contact#/?v=...  y  /zetaria-build/contact#/?v=...  (se siguen aceptando)
   var rest = path.length ? path + hash : hash.replace(/^#/, "");
-  var hasLink = rest.indexOf("#") > 0;
+  var hasLink = rest.indexOf("#") > 0 || /^(h~[^~#]+~|[a-z]{2,}~)./i.test(rest);
 
   if (hasLink) {
     var appUrl = "zetaria:/" + rest;
