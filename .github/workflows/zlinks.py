@@ -27,7 +27,7 @@ here = pathlib.Path(__file__).parent
 K = mp / "common/src/commonMain/kotlin/chat/simplex/common"
 Z = "chat.simplex.common.views.zetaria.ZetariaLinks"
 
-repo = os.environ.get("ZETARIA_REPO", "LordTech-MNZ/zetaria-build").strip()
+repo = os.environ.get("ZETARIA_REPO", "0rlanther/zetaria-build").strip()
 m = re.fullmatch(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", repo)
 if not m:
     sys.exit(f"ERROR [zlinks]: ZETARIA_REPO inválido: {repo!r}")

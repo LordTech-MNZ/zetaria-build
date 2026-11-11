@@ -134,6 +134,14 @@ jobs:
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
+      - name: QR morados con el logo MNZ
+        # Cosmético y transaccional (todo o nada): si no encaja, el build sigue con los QR originales.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name qrstyle.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
       - name: Limitar a arm64 (solo tenemos el núcleo nativo de arm64)
         run: |
           sed -i 's/include("arm64-v8a", "armeabi-v7a")/include("arm64-v8a")/' src/apps/multiplatform/android/build.gradle.kts
@@ -470,4 +478,3 @@ jobs:
             --notes-file notes.md \
             --latest
           echo "Release publicada: $TAG"
-          
