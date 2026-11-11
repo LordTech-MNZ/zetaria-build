@@ -1,0 +1,22 @@
+// Zetaria: añade ZXing (generador/lector de códigos de barras y QR) al módulo :common
+// sin modificar ningún build.gradle de SimpleX. Se pasa a Gradle con -I.
+allprojects {
+    afterEvaluate { proj ->
+        if (proj.path == ':common') {
+            try {
+                def cfg = proj.configurations.findByName('androidMainImplementation')
+                if (cfg == null) {
+                    cfg = proj.configurations.findByName('implementation')
+                }
+                if (cfg != null) {
+                    proj.dependencies.add(cfg.name, 'com.google.zxing:core:3.5.3')
+                    println "ZETARIA: ZXing 3.5.3 añadido a :common (${cfg.name})"
+                } else {
+                    println "ZETARIA: AVISO: no hay configuración de dependencias en :common"
+                }
+            } catch (Throwable t) {
+                println "ZETARIA: AVISO: no se pudo añadir ZXing: ${t}"
+            }
+        }
+    }
+}

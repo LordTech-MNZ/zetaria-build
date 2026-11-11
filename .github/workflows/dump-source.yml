@@ -1,0 +1,39 @@
+name: Exportar código de SimpleX (para revisión)
+
+# No compila nada. Solo empaqueta los archivos .kt del tag elegido para poder leerlos
+# y escribir funciones nuevas (como encuestas) sin adivinar.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de SimpleX (el mismo que usas para compilar)"
+        default: "v7.0.3"
+        required: true
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Código fuente de SimpleX
+        uses: actions/checkout@v4
+        with:
+          repository: simplex-chat/simplex-chat
+          ref: ${{ inputs.tag }}
+          path: src
+
+      - name: Empaquetar archivos Kotlin y textos base
+        run: |
+          cd src/apps/multiplatform/common/src
+          find commonMain/kotlin androidMain/kotlin -name '*.kt' > /tmp/files.txt
+          echo commonMain/resources/MR/base/strings.xml >> /tmp/files.txt
+          echo "Archivos: $(wc -l < /tmp/files.txt)"
+          mkdir -p /tmp/out
+          zip -q /tmp/out/simplex-source.zip -@ < /tmp/files.txt
+          ls -la /tmp/out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simplex-source
+          path: /tmp/out/simplex-source.zip
+          retention-days: 3
