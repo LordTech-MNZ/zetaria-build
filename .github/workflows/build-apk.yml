@@ -470,3 +470,4 @@ jobs:
             --notes-file notes.md \
             --latest
           echo "Release publicada: $TAG"
+          
