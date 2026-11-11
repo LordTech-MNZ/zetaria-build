@@ -9,12 +9,14 @@
 <meta name="description" content="Fuiste invitado al Reino Soberano de Zetaria por medio de un enlace que conecta el mundo terrenal y virtual en uno solo.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Zetaria">
+<meta property="og:url" content="https://lordtech-mnz.github.io/zetaria-build/">
 <meta property="og:title" content="Zetaria — Reino Soberano">
 <meta property="og:description" content="Fuiste invitado al Reino Soberano de Zetaria por medio de un enlace que conecta el mundo terrenal y virtual en uno solo.">
 <meta property="og:image" content="https://lordtech-mnz.github.io/zetaria-build/og-flag.jpg">
 <meta property="og:image:type" content="image/jpeg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Bandera de Zetaria">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Zetaria — Reino Soberano">
 <meta name="twitter:description" content="Fuiste invitado al Reino Soberano de Zetaria por medio de un enlace que conecta el mundo terrenal y virtual en uno solo.">
@@ -53,7 +55,7 @@
   <p id="msg">Mensajería privada del Reino Soberano.</p>
 
   <a id="open" class="btn primary" href="#" hidden>Abrir en Zetaria</a>
-  <a id="apk" class="btn ghost" href="https://github.com/0rlanther/zetaria-build/releases/latest/download/Zetaria.apk">Descargar Zetaria (Android)</a>
+  <a id="apk" class="btn ghost" href="https://github.com/lordtech-mnz/zetaria-build/releases/latest/download/Zetaria.apk">Descargar Zetaria (Android)</a>
   <button id="copy" class="btn ghost" type="button" hidden>Copiar enlace para pegarlo en Zetaria</button>
 
   <p id="help" class="small" hidden>
@@ -67,14 +69,24 @@
   // (y ZETARIA_LINK_BASE en el workflow para que la app genere enlaces que apunten aquí).
   var BASE_PATH = "/zetaria-build";
 
+  // La descarga apunta al repositorio de esta misma página (usuario.github.io/repositorio)
+  if (/\.github\.io$/.test(location.hostname)) {
+    document.getElementById("apk").href = "https://github.com/" + location.hostname.split(".")[0] + BASE_PATH +
+      "/releases/latest/download/Zetaria.apk";
+  }
+
   var path = location.pathname;
   if (path.indexOf(BASE_PATH) === 0) path = path.slice(BASE_PATH.length);
   path = path.replace(/^\/+/, "");
+  if (path === "index.html" || path === "404.html") path = "";
   var hash = location.hash;
-  var hasLink = path.length > 0 && path !== "index.html" && path !== "404.html" && hash.length > 1;
+  // Formato nuevo:   /zetaria-build/#contact#/?v=...   (todo tras el primer #; la ruta es la raíz -> HTTP 200 -> vista previa)
+  // Formato antiguo: /zetaria-build/contact#/?v=...    (ruta + #; se sigue aceptando)
+  var rest = path.length ? path + hash : hash.replace(/^#/, "");
+  var hasLink = rest.indexOf("#") > 0;
 
   if (hasLink) {
-    var appUrl = "zetaria:/" + path + hash;
+    var appUrl = "zetaria:/" + rest;
     var open = document.getElementById("open");
     open.href = appUrl;
     open.hidden = false;
