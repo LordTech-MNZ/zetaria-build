@@ -4,7 +4,10 @@
 Problema: la app genera enlaces https://simplex.chat/... y https://smpN.simplex.im/..., que al tocarlos fuera
 de la app abren (o descargan) SimpleX original. Aquí se cambian por enlaces de Zetaria:
 
-    <BASE>/contact#...            (BASE = tu página de GitHub Pages, p. ej. https://0rlanther.github.io/zetaria-build)
+    <BASE>/#contact#...           (BASE = tu página de GitHub Pages, p. ej. https://0rlanther.github.io/zetaria-build)
+
+El «/#» es a propósito: la ruta pedida es la raíz (HTTP 200, con las etiquetas og:image de la bandera), así que
+Messenger, WhatsApp, Telegram y Discord muestran vista previa; con una ruta tipo /contact sería un 404 sin vista previa.
 
 que abren una página de aterrizaje (docs/index.html) con el botón «Abrir en Zetaria» (esquema zetaria:/) y la
 descarga del APK si aún no la tienen. El núcleo de SimpleX no se toca: solo se traduce en la frontera de la app.
