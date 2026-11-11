@@ -30,10 +30,17 @@ jobs:
           echo "Archivos: $(wc -l < /tmp/files.txt)"
           mkdir -p /tmp/out
           zip -q /tmp/out/simplex-source.zip -@ < /tmp/files.txt
+          # Módulo android (NtfManager, etc.) + lista de recursos (drawables, íconos): para revisar notificaciones
+          cd ../../android/src/main
+          find java -name '*.kt' > /tmp/files-android.txt
+          find res -type f | sort > res-list.txt
+          echo res-list.txt >> /tmp/files-android.txt
+          echo "Archivos android: $(wc -l < /tmp/files-android.txt)"
+          zip -q /tmp/out/simplex-android-source.zip -@ < /tmp/files-android.txt
           ls -la /tmp/out
 
       - uses: actions/upload-artifact@v4
         with:
           name: simplex-source
-          path: /tmp/out/simplex-source.zip
+          path: /tmp/out/
           retention-days: 3

@@ -142,6 +142,15 @@ jobs:
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
+      - name: Logo MNZ en las notificaciones (en vez del símbolo de SimpleX)
+        # Cosmético y transaccional (todo o nada): si no encuentra el código de notificaciones, imprime un
+        # diagnóstico y el build sigue con el ícono original.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name ntficon.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
       - name: Limitar a arm64 (solo tenemos el núcleo nativo de arm64)
         run: |
           sed -i 's/include("arm64-v8a", "armeabi-v7a")/include("arm64-v8a")/' src/apps/multiplatform/android/build.gradle.kts
