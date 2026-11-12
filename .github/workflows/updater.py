@@ -8,6 +8,8 @@ Qué hace sobre el código de SimpleX:
   3) Copia ZetariaUpdate.{common,android,desktop}.kt (comprobación + diálogo + descarga + instalación),
      con el número de compilación y el repositorio incrustados.
   4) Engancha ZetariaUpdateHost() justo después de MainScreen() para que el aviso salga sobre la app.
+  5) Añade el botón «Buscar actualizaciones» en Configuración > Configuración avanzada (solo Android), que
+     comprueba al momento la última Release del repositorio y dice si hay versión nueva, si estás al día o el error.
 
 Variables de entorno (las pone el workflow):
   ZETARIA_BUILD_NUMBER  número de compilación (github.run_number). Si es 0 no se toca la versión.
@@ -25,7 +27,7 @@ here = pathlib.Path(__file__).parent
 tpl = here / "templates" / "updater"
 
 build = os.environ.get("ZETARIA_BUILD_NUMBER", "0").strip() or "0"
-repo = os.environ.get("ZETARIA_REPO", "0rlanther/zetaria-build").strip()
+repo = (os.environ.get("ZETARIA_REPO") or os.environ.get("GITHUB_REPOSITORY") or "lordtech-mnz/zetaria-build").strip()
 if not re.fullmatch(r"\d+", build):
     sys.exit(f"ZETARIA_BUILD_NUMBER inválido: {build!r}")
 if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -99,6 +101,24 @@ for f in cands:
         break
 if not hooked:
     fail("no encuentro una única llamada «MainScreen()» donde enganchar el aviso de actualización")
+
+# 3b) Botón «Buscar actualizaciones» en Configuración avanzada (justo antes de «Salir») ----------------------------
+settings_kt = mp / "common/src/commonMain/kotlin/chat/simplex/common/views/usersettings/SettingsView.kt"
+if not settings_kt.exists():
+    fail("no existe views/usersettings/SettingsView.kt")
+t = settings_kt.read_text(encoding="utf-8")
+anchor = "      AppShutdownItem()\n      AppVersionItem(showVersion)\n"
+if t.count(anchor) != 1:
+    fail(f"SettingsView.kt: no encuentro «AppShutdownItem() + AppVersionItem(showVersion)» (aparece {t.count(anchor)} veces)")
+button = (
+    "      if (appPlatform == AppPlatform.ANDROID) {\n"
+    "        // Zetaria: comprobar actualizaciones a mano (el resultado lo muestra ZetariaUpdateHost)\n"
+    "        SettingsActionItem(painterResource(MR.images.ic_upgrade), \"Buscar actualizaciones\", "
+    "{ chat.simplex.common.views.zetaria.ZetariaUpdateBus.requestCheck() })\n"
+    "      }\n"
+)
+changes[settings_kt] = t.replace(anchor, button + anchor, 1)
+print("   [updater] botón «Buscar actualizaciones» añadido a Configuración")
 
 # 4) Archivos Kotlin --------------------------------------------------------------------------------
 common_src = tpl / "ZetariaUpdate.common.kt"
