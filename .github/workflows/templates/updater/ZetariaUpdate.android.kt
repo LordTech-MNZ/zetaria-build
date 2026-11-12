@@ -64,27 +64,35 @@ private class ZuInfo(val build: Int, val notes: String, val url: String, val siz
 
 private sealed class ZuState {
   object Idle : ZuState()
+  object Checking : ZuState()
+  class UpToDate(val build: Int) : ZuState()
+  class CheckFailed(val message: String) : ZuState()
   class Available(val info: ZuInfo) : ZuState()
   class Downloading(val info: ZuInfo, val progress: Float) : ZuState()
   class Installing(val info: ZuInfo) : ZuState()
   class Failed(val info: ZuInfo, val message: String) : ZuState()
 }
 
-private suspend fun zuBuscarUltima(): ZuInfo? = withContext(Dispatchers.IO) {
+private suspend fun zuBuscarUltima(): ZuInfo = withContext(Dispatchers.IO) {
   val conn = URL("https://api.github.com/repos/${ZetariaUpdateConfig.REPO}/releases/latest").openConnection() as HttpURLConnection
   try {
     conn.connectTimeout = 15_000
     conn.readTimeout = 15_000
     conn.setRequestProperty("Accept", "application/vnd.github+json")
     conn.setRequestProperty("User-Agent", "Zetaria-Updater")
-    if (conn.responseCode != 200) {
-      Log.d(ZU_TAG, "GitHub respondió ${conn.responseCode}")
-      return@withContext null
+    val code = conn.responseCode
+    if (code != 200) {
+      Log.d(ZU_TAG, "GitHub respondió $code")
+      throw IllegalStateException(
+        if (code == 404) "No hay versiones publicadas todavía (o el repositorio es privado)."
+        else "GitHub respondió con el código $code. Inténtalo más tarde."
+      )
     }
     val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
     val tag = json.optString("tag_name")
-    val build = Regex("-b(\\d+)$").find(tag)?.groupValues?.get(1)?.toIntOrNull() ?: return@withContext null
-    val assets = json.optJSONArray("assets") ?: return@withContext null
+    val build = Regex("-b(\\d+)$").find(tag)?.groupValues?.get(1)?.toIntOrNull()
+      ?: throw IllegalStateException("La última versión publicada («$tag») no tiene un número de compilación válido.")
+    val assets = json.optJSONArray("assets") ?: throw IllegalStateException("La última versión no incluye archivos.")
     var found: ZuInfo? = null
     for (i in 0 until assets.length()) {
       val a = assets.getJSONObject(i)
@@ -93,7 +101,7 @@ private suspend fun zuBuscarUltima(): ZuInfo? = withContext(Dispatchers.IO) {
         break
       }
     }
-    found
+    found ?: throw IllegalStateException("La última versión no incluye el APK de Zetaria.")
   } finally {
     conn.disconnect()
   }
@@ -211,13 +219,38 @@ actual fun ZetariaUpdateHost() {
     delay(2500)
     try {
       val info = zuBuscarUltima()
-      Log.d(ZU_TAG, "Compilación instalada: ${ZetariaUpdateConfig.BUILD_NUMBER}; última publicada: ${info?.build}")
-      if (info != null && info.build > ZetariaUpdateConfig.BUILD_NUMBER) {
+      Log.d(ZU_TAG, "Compilación instalada: ${ZetariaUpdateConfig.BUILD_NUMBER}; última publicada: ${info.build}")
+      if (info.build > ZetariaUpdateConfig.BUILD_NUMBER) {
         ultima = info
         state = ZuState.Available(info)
       }
     } catch (e: Exception) {
       Log.d(ZU_TAG, "No se pudo comprobar actualizaciones: ${e.message}")
+    }
+  }
+
+  // Botón «Buscar actualizaciones» de Configuración: siempre da respuesta (hay versión nueva / estás al día / error)
+  val pedidas = ZetariaUpdateBus.checkRequests
+  LaunchedEffect(pedidas) {
+    if (pedidas == 0 || state is ZuState.Downloading) return@LaunchedEffect
+    state = ZuState.Checking
+    try {
+      val info = zuBuscarUltima()
+      if (state !is ZuState.Checking) return@LaunchedEffect // el usuario canceló
+      ultima = info
+      state = if (info.build > ZetariaUpdateConfig.BUILD_NUMBER) ZuState.Available(info)
+              else ZuState.UpToDate(ZetariaUpdateConfig.BUILD_NUMBER)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Log.d(ZU_TAG, "Comprobación manual fallida: ${e.stackTraceToString()}")
+      if (state is ZuState.Checking) {
+        val msg = e.message.orEmpty()
+        state = ZuState.CheckFailed(
+          if (e is IllegalStateException && msg.isNotBlank()) msg
+          else "No se pudo comprobar. Revisa tu conexión a internet e inténtalo de nuevo."
+        )
+      }
     }
   }
 
@@ -240,6 +273,26 @@ actual fun ZetariaUpdateHost() {
 
   when (val s = state) {
     is ZuState.Idle -> {}
+    is ZuState.Checking -> AlertDialog(
+      onDismissRequest = {},
+      title = { Text("Buscando actualizaciones…") },
+      text = { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) },
+      confirmButton = {},
+      dismissButton = { TextButton(onClick = { state = ZuState.Idle }) { Text("Cancelar") } }
+    )
+    is ZuState.UpToDate -> AlertDialog(
+      onDismissRequest = { state = ZuState.Idle },
+      title = { Text("Zetaria está al día") },
+      text = { Text("Ya tienes la última versión (compilación ${s.build}).") },
+      confirmButton = { TextButton(onClick = { state = ZuState.Idle }) { Text("Aceptar") } }
+    )
+    is ZuState.CheckFailed -> AlertDialog(
+      onDismissRequest = { state = ZuState.Idle },
+      title = { Text("No se pudo comprobar") },
+      text = { Text(s.message) },
+      confirmButton = { TextButton(onClick = { ZetariaUpdateBus.requestCheck() }) { Text("Reintentar") } },
+      dismissButton = { TextButton(onClick = { state = ZuState.Idle }) { Text("Cerrar") } }
+    )
     is ZuState.Available -> AlertDialog(
       onDismissRequest = { state = ZuState.Idle },
       title = { Text("Actualización disponible") },
