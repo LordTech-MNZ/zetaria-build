@@ -151,6 +151,14 @@ jobs:
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
+      - name: Roles de miembros (asignar roles y renombrarlos con el lápiz)
+        # Transaccional (todo o nada): si no encaja con el código de SimpleX, el build sigue sin este botón.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name roles.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
       - name: Limitar a arm64 (solo tenemos el núcleo nativo de arm64)
         run: |
           sed -i 's/include("arm64-v8a", "armeabi-v7a")/include("arm64-v8a")/' src/apps/multiplatform/android/build.gradle.kts
