@@ -56,7 +56,7 @@ button = (
     "            \"Roles de miembros\",\n"
     "            {\n"
     "              ModalManager.end.showCustomModal { close ->\n"
-    "                chat.simplex.common.views.zetaria.ZetariaRolesView(chat.remoteHostId, chat.id, close)\n"
+    "                ZetariaRolesView(chat.remoteHostId, chat.id, close)\n"
     "              }\n"
     "            },\n"
     "            iconColor = MaterialTheme.colors.secondary\n"
@@ -64,6 +64,9 @@ button = (
     "        }\n"
 )
 sub_once("views/chat/group/GroupChatInfoView.kt", anchor, button + anchor, "botón de roles")
+# Import (no se puede escribir «chat.simplex...» en esa pantalla: la variable local `chat` taparía al paquete)
+sub_once("views/chat/group/GroupChatInfoView.kt", "import chat.simplex.res.MR\n",
+         "import chat.simplex.res.MR\nimport chat.simplex.common.views.zetaria.ZetariaRolesView\n", "import de ZetariaRolesView")
 
 # 3) Pantalla
 src = here / "templates/roles/ZetariaRoles.kt"
