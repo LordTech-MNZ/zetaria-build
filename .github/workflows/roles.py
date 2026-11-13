@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Zetaria: botón «Roles de miembros» en la configuración de los grupos.
 
-  1) GroupMemberRole.text() pasa a buscar primero un nombre propio guardado en el dispositivo (lápiz) y, si no
-     hay, usa el nombre original (que queda en defaultText()). Así el nombre propio se ve en toda la app.
+  1) (los nombres de rol ahora son POR GRUPO y se resuelven en ZetariaRoles.roleLabel(); ya no se toca GroupMemberRole)
   2) En Información del grupo (sección «Editar perfil / Mensaje de bienvenida / Preferencias») aparece el botón
      «Roles de miembros», que abre ZetariaRolesView: renombrar roles con el lápiz y asignar roles a miembros.
   3) Se copia ZetariaRoles.kt.
+  5) SINCRONIZACIÓN: cada cambio de nombre/apodo se publica en el grupo como un aviso (mensaje de tipo propio
+     «zetaria_roles» con texto legible). Al llegar un mensaje nuevo de ese tipo, SimpleXAPI.kt avisa a
+     ZetariaRolesSync.onReceived(), que lo aplica solo si el emisor es moderador+ (jerarquía comprobada en cada teléfono).
   4) Apodo de rol INDIVIDUAL (opcional, desde el lápiz): se muestra en la lista de miembros, en la burbuja de cada
      mensaje del grupo, en la ficha del miembro y en las listas de canal/soporte.
   Jerarquía: solo propietario, administrador y moderador pueden cambiar nombres y apodos (ver ZetariaRoles.kt).
@@ -38,16 +40,6 @@ def sub_once(rel, old, new, what):
         fail(f"{what}: el texto esperado aparece {n} veces en {rel} (debía ser 1)")
     changes[p] = t.replace(old, new, 1)
 
-
-# 1) Nombre propio de los roles
-sub_once("model/ChatModel.kt",
-         "  fun text(isChannel: Boolean): String = when (this) {\n    Relay -> generalGetString(MR.strings.group_member_role_relay)\n",
-         "  // Zetaria: nombre propio del rol (si lo hay) o el original\n"
-         "  fun text(isChannel: Boolean): String =\n"
-         "    chat.simplex.common.views.zetaria.ZetariaRoles.aliasFor(this) ?: defaultText(isChannel)\n\n"
-         "  fun defaultText(isChannel: Boolean): String = when (this) {\n"
-         "    Relay -> generalGetString(MR.strings.group_member_role_relay)\n",
-         "GroupMemberRole.text")
 
 # 2) Botón en la información del grupo
 anchor = "        GroupPreferencesButton(prefsTitleId, openPreferences)\n"
@@ -126,6 +118,21 @@ sub_once("views/chat/group/MemberSupportView.kt",
          "rol en MemberSupportView")
 add_import("views/chat/group/MemberSupportView.kt")
 
+# 2c) Gancho: mensajes nuevos de tipo «zetaria_roles» -------------------------------------------------------
+sub_once("model/SimpleXAPI.kt",
+         "          val file = cItem.file\n          val mc = cItem.content.msgContent\n",
+         "          val file = cItem.file\n          val mc = cItem.content.msgContent\n"
+         "          // Zetaria: avisos de nombres/apodos de rol enviados por moderadores, administradores o el propietario\n"
+         "          if (mc is MsgContent.MCUnknown && mc.type == ZetariaRolesSync.TYPE) {\n"
+         "            ZetariaRolesSync.onReceived(rhId, cInfo, cItem, mc)\n"
+         "          }\n",
+         "gancho de avisos de roles")
+p2 = K / "model/SimpleXAPI.kt"
+t2 = changes.get(p2, p2.read_text(encoding="utf-8"))
+if "\nimport " not in t2:
+    fail("SimpleXAPI.kt: no encuentro la zona de imports")
+changes[p2] = t2.replace("\nimport ", "\nimport chat.simplex.common.views.zetaria.ZetariaRolesSync\nimport ", 1)
+
 # 3) Pantalla
 src = here / "templates/roles/ZetariaRoles.kt"
 if not src.exists():
@@ -136,4 +143,4 @@ changes[dest] = src.read_text(encoding="utf-8")
 for p, content in changes.items():
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-print(f"   [roles] botón «Roles de miembros» + apodos individuales ({len(changes)} archivos)")
+print(f"   [roles] roles por grupo + apodos individuales + sincronización ({len(changes)} archivos)")
