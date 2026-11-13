@@ -32,10 +32,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import chat.simplex.common.model.CIDirection
 import chat.simplex.common.model.ChatInfo
+import chat.simplex.common.model.ChatItem
+import chat.simplex.common.model.ChatType
+import chat.simplex.common.model.ComposedMessage
 import chat.simplex.common.model.GroupInfo
 import chat.simplex.common.model.GroupMember
 import chat.simplex.common.model.GroupMemberRole
+import chat.simplex.common.model.MsgContent
 import chat.simplex.common.platform.ColumnWithScrollBar
 import chat.simplex.common.platform.chatModel
 import chat.simplex.common.platform.settings
@@ -44,8 +49,18 @@ import chat.simplex.common.views.chat.group.updateMemberRoleDialog
 import chat.simplex.common.views.chat.group.updateMembersRole
 import chat.simplex.common.views.helpers.AppBarTitle
 import chat.simplex.common.views.helpers.ModalView
+import chat.simplex.common.views.helpers.withBGApi
 import chat.simplex.res.MR
 import dev.icerock.moko.resources.compose.painterResource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.datetime.Clock
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 /*
  * Roles de miembros de Zetaria.
@@ -53,16 +68,17 @@ import dev.icerock.moko.resources.compose.painterResource
  * Los roles de un grupo (observador, miembro, moderador, administrador, propietario) los define el núcleo de
  * SimpleX y viajan en el protocolo: no se pueden crear roles nuevos desde la app. Lo que sí se puede es
  *   - asignar a cada miembro cualquiera de los roles que tu propio rol te permite (igual que en su ficha),
- *   - ponerle a cada rol un NOMBRE PROPIO (p. ej. «Moderador» -> «Capitán») que vale para todos los que tengan ese rol, y
- *   - (opcional) ponerle un APODO DE ROL a UN miembro concreto, que solo cambia cómo ves a esa persona.
- * Todos los nombres y apodos se guardan en este dispositivo; los demás miembros ven los originales o los suyos.
+ *   - ponerle a cada rol un NOMBRE PROPIO en ese grupo (p. ej. «Moderador» -> «Conde»), y
+ *   - (opcional) ponerle un APODO DE ROL a UN miembro concreto.
  *
- * Jerarquía: solo propietarios, administradores y moderadores del grupo pueden cambiar nombres y apodos, y un apodo
- * individual solo se puede poner a miembros con un rol igual o menor al tuyo (la misma regla que para asignar roles).
+ * Los nombres y apodos son POR GRUPO y los ve todo el grupo (los que usan Zetaria): cada cambio se publica en el
+ * grupo como un aviso (mensaje de tipo propio «zetaria_roles», con un texto legible para quien no use Zetaria), y
+ * cada app que lo recibe lo aplica SOLO si quien lo envió es moderador, administrador o propietario en ese momento
+ * (y, para un apodo individual, si su rol es igual o mayor al del miembro). Así la jerarquía la comprueba cada
+ * dispositivo por su cuenta. Si hay dos cambios sobre lo mismo, gana el más reciente.
  */
 object ZetariaRoles {
-  private const val PREFIX = "zetaria_role_alias_"
-  private const val MEMBER_PREFIX = "zetaria_member_alias_"
+  private const val SEP = "\u001F"
   private var version by mutableStateOf(0)
 
   val editableRoles: List<GroupMemberRole> = listOf(
@@ -81,49 +97,187 @@ object ZetariaRoles {
   fun canEditMemberName(groupInfo: GroupInfo, member: GroupMember): Boolean =
     canEditNames(groupInfo) && member.memberRole <= groupInfo.membership.memberRole
 
-  // Nombre propio del rol, o null si no tiene (entonces se usa el original). Lee `version` para que las
-  // pantallas se actualicen solas al renombrar.
-  fun aliasFor(role: GroupMemberRole): String? {
-    if (version < 0) return null
-    if (role !in editableRoles) return null
-    val saved = settings.getString(PREFIX + role.memberRole, "").trim()
-    return if (saved.isEmpty()) null else saved
+  fun cleanName(name: String): String = name.replace(SEP, "").trim().take(24)
+
+  // ---- almacenamiento (en este dispositivo, por grupo). Se guarda también la hora del cambio, incluso cuando el
+  // nombre queda vacío, para que un cambio antiguo no pueda deshacer uno más nuevo.
+  private class Stored(val ts: Long, val role: String, val name: String)
+
+  private fun roleKey(groupId: Long, role: GroupMemberRole): String =
+    "zetaria_g" + groupId.toString() + "_role_" + role.memberRole
+
+  private fun memberKey(groupId: Long, memberId: String): String =
+    "zetaria_g" + groupId.toString() + "_mem_" + memberId
+
+  private fun readRole(groupId: Long, role: GroupMemberRole): Stored? {
+    val raw = settings.getString(roleKey(groupId, role), "")
+    if (raw.isEmpty()) return null
+    val p = raw.split(SEP)
+    val ts = p.getOrNull(0)?.toLongOrNull() ?: return null
+    return Stored(ts, role.memberRole, p.getOrNull(1) ?: "")
   }
 
-  // Nombre vacío = restablecer el original
-  fun setAlias(role: GroupMemberRole, name: String) {
-    val clean = name.trim().take(24)
-    if (clean.isEmpty()) settings.remove(PREFIX + role.memberRole)
-    else settings.putString(PREFIX + role.memberRole, clean)
+  private fun readMember(groupId: Long, memberId: String): Stored? {
+    val raw = settings.getString(memberKey(groupId, memberId), "")
+    if (raw.isEmpty()) return null
+    val p = raw.split(SEP)
+    val ts = p.getOrNull(0)?.toLongOrNull() ?: return null
+    return Stored(ts, p.getOrNull(1) ?: "", p.getOrNull(2) ?: "")
+  }
+
+  private fun writeRole(groupId: Long, role: GroupMemberRole, ts: Long, name: String) {
+    settings.putString(roleKey(groupId, role), ts.toString() + SEP + name)
     version += 1
   }
 
-  private fun memberKey(member: GroupMember): String =
-    MEMBER_PREFIX + member.groupId.toString() + "_" + member.groupMemberId.toString()
+  private fun writeMember(groupId: Long, memberId: String, role: GroupMemberRole, ts: Long, name: String) {
+    settings.putString(memberKey(groupId, memberId), ts.toString() + SEP + role.memberRole + SEP + name)
+    version += 1
+  }
 
-  // Apodo individual del rol de este miembro. Se guarda junto al rol al que se puso: si el miembro cambia de rol,
-  // el apodo deja de aplicarse.
+  private fun nextTs(previous: Long?): Long {
+    val now = Clock.System.now().toEpochMilliseconds()
+    return if (previous != null && previous >= now) previous + 1 else now
+  }
+
+  // ---- lectura (lee `version` para que las pantallas se actualicen solas)
+  fun groupRoleAlias(groupId: Long, role: GroupMemberRole): String? {
+    if (version < 0) return null
+    val s = readRole(groupId, role) ?: return null
+    return if (s.name.isEmpty()) null else s.name
+  }
+
+  fun roleName(groupId: Long, role: GroupMemberRole, isChannel: Boolean): String =
+    groupRoleAlias(groupId, role) ?: role.text(isChannel)
+
+  // Apodo individual del rol de este miembro. Está atado al rol en que se puso: si el miembro cambia de rol, deja de verse.
   fun memberAlias(member: GroupMember): String? {
     if (version < 0) return null
-    val saved = settings.getString(memberKey(member), "")
-    val sep = saved.indexOf(':')
-    if (sep <= 0) return null
-    if (saved.substring(0, sep) != member.memberRole.memberRole) return null
-    val name = saved.substring(sep + 1).trim()
-    return if (name.isEmpty()) null else name
+    val s = readMember(member.groupId, member.memberId) ?: return null
+    if (s.role != member.memberRole.memberRole || s.name.isEmpty()) return null
+    return s.name
   }
 
-  // Nombre vacío = quitar el apodo individual
-  fun setMemberAlias(member: GroupMember, name: String) {
-    val clean = name.trim().take(24)
-    if (clean.isEmpty()) settings.remove(memberKey(member))
-    else settings.putString(memberKey(member), member.memberRole.memberRole + ":" + clean)
-    version += 1
-  }
-
-  // Lo que se muestra como rol de un miembro: su apodo individual, o el nombre del rol (propio u original)
+  // Lo que se muestra como rol de un miembro: su apodo individual, o el nombre del rol en ese grupo
   fun roleLabel(member: GroupMember, isChannel: Boolean): String =
-    memberAlias(member) ?: member.memberRole.text(isChannel)
+    memberAlias(member) ?: roleName(member.groupId, member.memberRole, isChannel)
+
+  // ---- cambios hechos por ti (se guardan y se avisan al grupo). Nombre vacío = volver al original / quitar apodo
+  fun setGroupRoleAlias(rhId: Long?, groupInfo: GroupInfo, role: GroupMemberRole, name: String) {
+    val clean = cleanName(name)
+    val ts = nextTs(readRole(groupInfo.groupId, role)?.ts)
+    writeRole(groupInfo.groupId, role, ts, clean)
+    ZetariaRolesSync.announceRole(rhId, groupInfo, role, clean, ts)
+  }
+
+  fun setMemberAlias(rhId: Long?, groupInfo: GroupInfo, member: GroupMember, name: String) {
+    val clean = cleanName(name)
+    val ts = nextTs(readMember(groupInfo.groupId, member.memberId)?.ts)
+    writeMember(groupInfo.groupId, member.memberId, member.memberRole, ts, clean)
+    ZetariaRolesSync.announceMember(rhId, groupInfo, member, clean, ts)
+  }
+
+  // ---- cambios recibidos del grupo (ya verificados): solo se aplican si son más nuevos que lo guardado
+  fun applyRemoteRole(groupId: Long, role: GroupMemberRole, name: String, ts: Long) {
+    val current = readRole(groupId, role)
+    if (current != null && current.ts >= ts) return
+    writeRole(groupId, role, ts, name)
+  }
+
+  fun applyRemoteMember(groupId: Long, memberId: String, role: GroupMemberRole, name: String, ts: Long) {
+    val current = readMember(groupId, memberId)
+    if (current != null && current.ts >= ts) return
+    writeMember(groupId, memberId, role, ts, name)
+  }
+}
+
+// Envío y recepción de los avisos de apodos por el propio grupo
+object ZetariaRolesSync {
+  const val TYPE = "zetaria_roles"
+
+  fun announceRole(rhId: Long?, groupInfo: GroupInfo, role: GroupMemberRole, name: String, ts: Long) {
+    val original = role.text(groupInfo.isChannel)
+    val text = if (name.isEmpty()) "🏷️ El rol «" + original + "» vuelve a su nombre original"
+      else "🏷️ El rol «" + original + "» ahora se llama «" + name + "»"
+    post(rhId, groupInfo, text, "role", role, null, name, ts)
+  }
+
+  fun announceMember(rhId: Long?, groupInfo: GroupInfo, member: GroupMember, name: String, ts: Long) {
+    val text = if (name.isEmpty()) "🎖️ Se quitó el apodo de rol de " + member.chatViewName
+      else "🎖️ Apodo de rol de " + member.chatViewName + ": «" + name + "»"
+    post(rhId, groupInfo, text, "member", member.memberRole, member.memberId, name, ts)
+  }
+
+  private fun post(rhId: Long?, groupInfo: GroupInfo, text: String, op: String, role: GroupMemberRole, memberId: String?, name: String, ts: Long) {
+    if (groupInfo.useRelays) return // en canales los nombres solo se guardan en este dispositivo
+    val json = buildJsonObject {
+      put("type", TYPE)
+      put("text", text)
+      put("v", 1)
+      put("op", op)
+      put("role", role.memberRole)
+      if (memberId != null) put("memberId", memberId)
+      put("name", name)
+      put("ts", ts)
+    }
+    withBGApi {
+      try {
+        val items = chatModel.controller.apiSendMessages(
+          rh = rhId,
+          type = ChatType.Group,
+          id = groupInfo.apiId,
+          scope = null,
+          composedMessages = listOf(
+            ComposedMessage(null, null, MsgContent.MCUnknown(type = TYPE, text = text, json = json), emptyMap())
+          )
+        )
+        if (!items.isNullOrEmpty()) {
+          items.forEach { aChatItem ->
+            withContext(Dispatchers.Main) {
+              chatModel.chatsContext.addChatItem(rhId, aChatItem.chatInfo, aChatItem.chatItem)
+            }
+          }
+        }
+      } catch (e: Exception) {
+        // si el aviso no sale, el cambio queda guardado en este dispositivo
+      }
+    }
+  }
+
+  // Llamado por la app cada vez que llega un mensaje nuevo de tipo desconocido
+  fun onReceived(rhId: Long?, chatInfo: ChatInfo, item: ChatItem, content: MsgContent.MCUnknown) {
+    if (content.type != TYPE) return
+    val group = (chatInfo as? ChatInfo.Group)?.groupInfo ?: return
+    val sender = (item.chatDir as? CIDirection.GroupRcv)?.groupMember ?: return
+    val json = content.json as? JsonObject ?: return
+    withBGApi {
+      try {
+        process(rhId, group, sender, json)
+      } catch (e: Exception) {
+        // aviso mal formado: se ignora
+      }
+    }
+  }
+
+  private suspend fun process(rhId: Long?, group: GroupInfo, sender: GroupMember, json: JsonObject) {
+    // Jerarquía: solo moderador, administrador y propietario
+    if (sender.memberRole < GroupMemberRole.Moderator) return
+    val op = json["op"]?.jsonPrimitive?.contentOrNull ?: return
+    val roleName = json["role"]?.jsonPrimitive?.contentOrNull ?: return
+    val role = GroupMemberRole.values().firstOrNull { it.memberRole == roleName } ?: return
+    val name = ZetariaRoles.cleanName(json["name"]?.jsonPrimitive?.contentOrNull ?: "")
+    val ts = json["ts"]?.jsonPrimitive?.longOrNull ?: return
+    if (op == "role") {
+      if (role !in ZetariaRoles.editableRoles) return
+      withContext(Dispatchers.Main) { ZetariaRoles.applyRemoteRole(group.groupId, role, name, ts) }
+    } else if (op == "member") {
+      val memberId = json["memberId"]?.jsonPrimitive?.contentOrNull ?: return
+      val target = chatModel.controller.apiListMembers(rhId, group.groupId).firstOrNull { it.memberId == memberId } ?: return
+      // el emisor no puede ponerle apodo a alguien con rol mayor al suyo, y el apodo es del rol que tiene ahora
+      if (target.memberRole > sender.memberRole || target.memberRole != role) return
+      withContext(Dispatchers.Main) { ZetariaRoles.applyRemoteMember(group.groupId, memberId, role, name, ts) }
+    }
+  }
 }
 
 @Composable
@@ -150,10 +304,10 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
           } else null
           SectionItemViewSpaceBetween(onClick) {
             Column(Modifier.weight(1f)) {
-              Text(role.text(isChannel = gInfo.isChannel))
-              if (ZetariaRoles.aliasFor(role) != null) {
+              Text(ZetariaRoles.roleName(gInfo.groupId, role, gInfo.isChannel))
+              if (ZetariaRoles.groupRoleAlias(gInfo.groupId, role) != null) {
                 Text(
-                  "Original: " + role.defaultText(isChannel = gInfo.isChannel),
+                  "Original: " + role.text(isChannel = gInfo.isChannel),
                   color = MaterialTheme.colors.secondary,
                   fontSize = 12.sp
                 )
@@ -173,7 +327,7 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
         }
       }
       SectionTextFooter(
-        if (canEdit) "Toca el lápiz para cambiar el nombre de un rol, o el apodo de un solo miembro. Los nombres se guardan en este dispositivo."
+        if (canEdit) "Toca el lápiz para cambiar el nombre de un rol, o el apodo de un solo miembro. Cada cambio se avisa en el grupo y lo ven todos los que usen Zetaria."
         else "Solo los propietarios, administradores y moderadores pueden cambiar los nombres de los roles."
       )
       SectionDividerSpaced()
@@ -196,12 +350,12 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
     }
   }
 
-  // Renombrar un rol (para todos) o poner un apodo a un solo miembro
+  // Renombrar un rol (para todos los que lo tengan) o poner un apodo a un solo miembro
   val roleToRename = renaming
   if (roleToRename != null && canEdit) {
     var individual by remember(roleToRename) { mutableStateOf(false) }
     var target by remember(roleToRename) { mutableStateOf<GroupMember?>(null) }
-    var text by remember(roleToRename) { mutableStateOf(ZetariaRoles.aliasFor(roleToRename) ?: "") }
+    var text by remember(roleToRename) { mutableStateOf(ZetariaRoles.groupRoleAlias(gInfo.groupId, roleToRename) ?: "") }
     val candidates: List<GroupMember> = members.filter {
       it.memberRole == roleToRename && it.memberCurrent && ZetariaRoles.canEditMemberName(gInfo, it)
     }
@@ -209,7 +363,7 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
     fun chooseAll() {
       individual = false
       target = null
-      text = ZetariaRoles.aliasFor(roleToRename) ?: ""
+      text = ZetariaRoles.groupRoleAlias(gInfo.groupId, roleToRename) ?: ""
     }
     fun chooseMember(m: GroupMember) {
       individual = true
@@ -223,7 +377,7 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
       text = {
         Column {
           Text(
-            "Nombre original: " + roleToRename.defaultText(isChannel = gInfo.isChannel),
+            "Nombre original: " + roleToRename.text(isChannel = gInfo.isChannel),
             color = MaterialTheme.colors.secondary
           )
           Row(
@@ -270,15 +424,21 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
             singleLine = true,
             label = { Text(if (individual) "Apodo para este miembro" else "Nuevo nombre del rol") }
           )
+          Text(
+            if (gInfo.useRelays) "En canales el cambio solo se guarda en tu dispositivo."
+            else "Se publicará un aviso en el grupo y lo verán todos los que usen Zetaria.",
+            color = MaterialTheme.colors.secondary,
+            fontSize = 12.sp
+          )
         }
       },
       confirmButton = {
         TextButton({
           val t = target
           if (individual) {
-            if (t != null) ZetariaRoles.setMemberAlias(t, text)
+            if (t != null) ZetariaRoles.setMemberAlias(rhId, gInfo, t, text)
           } else {
-            ZetariaRoles.setAlias(roleToRename, text)
+            ZetariaRoles.setGroupRoleAlias(rhId, gInfo, roleToRename, text)
           }
           renaming = null
         }, enabled = !individual || target != null) { Text("Guardar") }
@@ -288,9 +448,9 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
           TextButton({
             val t = target
             if (individual) {
-              if (t != null) ZetariaRoles.setMemberAlias(t, "")
+              if (t != null) ZetariaRoles.setMemberAlias(rhId, gInfo, t, "")
             } else {
-              ZetariaRoles.setAlias(roleToRename, "")
+              ZetariaRoles.setGroupRoleAlias(rhId, gInfo, roleToRename, "")
             }
             renaming = null
           }) { Text("Restablecer") }
@@ -322,7 +482,7 @@ fun ZetariaRolesView(rhId: Long?, chatId: String, close: () -> Unit) {
               verticalAlignment = Alignment.CenterVertically
             ) {
               RadioButton(selected = memberToAssign.memberRole == role, onClick = { pick(role) })
-              Text(role.text(isChannel = gInfo.isChannel))
+              Text(ZetariaRoles.roleName(gInfo.groupId, role, gInfo.isChannel))
             }
           }
         }
