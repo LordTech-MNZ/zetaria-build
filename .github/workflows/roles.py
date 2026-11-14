@@ -82,8 +82,9 @@ def add_import(rel):
 sub_once("views/chat/group/GroupChatInfoView.kt",
          "      if (role in listOf(GroupMemberRole.Owner, GroupMemberRole.Admin, GroupMemberRole.Moderator, GroupMemberRole.Observer)) {\n"
          "        Text(role.text(isChannel = isChannel), color = MaterialTheme.colors.secondary)\n",
-         "      if (role in listOf(GroupMemberRole.Owner, GroupMemberRole.Admin, GroupMemberRole.Moderator, GroupMemberRole.Observer) ||\n"
-         "        ZetariaRoles.memberAlias(member) != null) {\n"
+         "      // Zetaria: también se muestra la etiqueta de los miembros normales (SimpleX la oculta por defecto)\n"
+         "      if (role in listOf(GroupMemberRole.Owner, GroupMemberRole.Admin, GroupMemberRole.Moderator, GroupMemberRole.Observer,\n"
+         "          GroupMemberRole.Member) || ZetariaRoles.memberAlias(member) != null) {\n"
          "        Text(ZetariaRoles.roleLabel(member, isChannel), color = MaterialTheme.colors.secondary)\n",
          "rol en MemberRow")
 add_import("views/chat/group/GroupChatInfoView.kt")
@@ -91,7 +92,7 @@ add_import("views/chat/group/GroupChatInfoView.kt")
 # etiqueta del rol sobre los mensajes del grupo
 sub_once("views/chat/ChatView.kt",
          "if (memCount == 1 && member.memberRole > GroupMemberRole.Member) {",
-         "if (memCount == 1 && (member.memberRole > GroupMemberRole.Member || ZetariaRoles.memberAlias(member) != null)) {",
+         "if (memCount == 1 && (member.memberRole > GroupMemberRole.Member || ZetariaRoles.hasLabel(member))) {",
          "condición de la etiqueta de rol en mensajes")
 sub_once("views/chat/ChatView.kt",
          "member.memberRole.text(isChannel = chatInfo.isChannel),",
