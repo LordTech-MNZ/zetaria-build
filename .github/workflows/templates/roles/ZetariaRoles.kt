@@ -163,6 +163,11 @@ object ZetariaRoles {
   fun roleLabel(member: GroupMember, isChannel: Boolean): String =
     memberAlias(member) ?: roleName(member.groupId, member.memberRole, isChannel)
 
+  // ¿Este miembro tiene algún apodo (individual o del rol en este grupo)? Sirve para mostrar la etiqueta de rol
+  // también a los miembros normales, que SimpleX oculta por defecto.
+  fun hasLabel(member: GroupMember): Boolean =
+    memberAlias(member) != null || groupRoleAlias(member.groupId, member.memberRole) != null
+
   // ---- cambios hechos por ti (se guardan y se avisan al grupo). Nombre vacío = volver al original / quitar apodo
   fun setGroupRoleAlias(rhId: Long?, groupInfo: GroupInfo, role: GroupMemberRole, name: String) {
     val clean = cleanName(name)
