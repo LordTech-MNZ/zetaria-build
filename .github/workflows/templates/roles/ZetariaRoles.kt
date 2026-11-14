@@ -74,8 +74,9 @@ import kotlinx.serialization.json.put
  * Los nombres y apodos son POR GRUPO y los ve todo el grupo (los que usan Zetaria): cada cambio se publica en el
  * grupo como un aviso (mensaje de tipo propio «zetaria_roles», con un texto legible para quien no use Zetaria), y
  * cada app que lo recibe lo aplica SOLO si quien lo envió es moderador, administrador o propietario en ese momento
- * (y, para un apodo individual, si su rol es igual o mayor al del miembro). Así la jerarquía la comprueba cada
- * dispositivo por su cuenta. Si hay dos cambios sobre lo mismo, gana el más reciente.
+ * (y, para un apodo individual, si su rol es igual o mayor al rol del miembro). Un apodo individual solo se muestra
+ * mientras el miembro conserve el rol para el que se puso. Así la jerarquía la comprueba cada dispositivo por su
+ * cuenta. Si hay dos cambios sobre lo mismo, gana el más reciente.
  */
 object ZetariaRoles {
   private const val SEP = "\u001F"
@@ -272,9 +273,11 @@ object ZetariaRolesSync {
       withContext(Dispatchers.Main) { ZetariaRoles.applyRemoteRole(group.groupId, role, name, ts) }
     } else if (op == "member") {
       val memberId = json["memberId"]?.jsonPrimitive?.contentOrNull ?: return
-      val target = chatModel.controller.apiListMembers(rhId, group.groupId).firstOrNull { it.memberId == memberId } ?: return
-      // el emisor no puede ponerle apodo a alguien con rol mayor al suyo, y el apodo es del rol que tiene ahora
-      if (target.memberRole > sender.memberRole || target.memberRole != role) return
+      // Jerarquía: el aviso dice qué rol tiene el miembro; el emisor no puede ponerle apodo a un rol mayor al suyo.
+      // No se consulta la lista de miembros (esa consulta depende del perfil activo y no sirve para perfiles en segundo
+      // plano). Si el aviso mintiera sobre el rol, no tendría efecto: el apodo solo se muestra cuando ese rol coincide
+      // con el rol real del miembro (ver ZetariaRoles.memberAlias).
+      if (role > sender.memberRole) return
       withContext(Dispatchers.Main) { ZetariaRoles.applyRemoteMember(group.groupId, memberId, role, name, ts) }
     }
   }
