@@ -2,11 +2,13 @@ package chat.simplex.common.views.zetaria
 
 import SectionDividerSpaced
 import SectionItemView
+import SectionItemViewSpaceBetween
 import SectionTextFooter
 import SectionView
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedTextField
+import androidx.compose.material.Switch
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,6 +29,7 @@ import chat.simplex.common.views.helpers.ModalManager
 import chat.simplex.common.views.helpers.ModalView
 import chat.simplex.common.views.helpers.withBGApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /*
@@ -52,6 +55,7 @@ expect fun ZetariaGroupCallScreen(url: String, displayName: String, close: () ->
 
 object ZetariaGroupCall {
   private const val SERVER_KEY = "zetaria_call_server"
+  private const val BROWSER_KEY = "zetaria_call_browser"
   const val DEFAULT_SERVER = "https://meet.jit.si"
   private val linkRegex = Regex("^https://[^/\\s]+/Zetaria-[A-Za-z0-9]{16,}(?:[/?#].*)?$")
   private val serverRegex = Regex("^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$")
@@ -63,6 +67,13 @@ object ZetariaGroupCall {
 
   fun setServer(value: String) {
     settings.putString(SERVER_KEY, value)
+  }
+
+  // Si está activado, las llamadas se abren en el navegador del teléfono en vez de dentro de la app (más compatible)
+  fun useBrowser(): Boolean = settings.getBoolean(BROWSER_KEY, false)
+
+  fun setUseBrowser(value: Boolean) {
+    settings.putBoolean(BROWSER_KEY, value)
   }
 
   // «meet.ejemplo.com/» -> «https://meet.ejemplo.com». Devuelve null si no es una dirección https válida.
@@ -127,6 +138,7 @@ object ZetariaGroupCall {
 fun ZetariaGroupCallStartView(rhId: Long?, groupInfo: GroupInfo, close: () -> Unit) {
   var serverText by remember { mutableStateOf(ZetariaGroupCall.server()) }
   var error by remember { mutableStateOf<String?>(null) }
+  var browser by remember { mutableStateOf(ZetariaGroupCall.useBrowser()) }
 
   ModalView(close = close, cardScreen = true) {
     ColumnWithScrollBar {
@@ -150,6 +162,16 @@ fun ZetariaGroupCallStartView(rhId: Long?, groupInfo: GroupInfo, close: () -> Un
       SectionDividerSpaced()
 
       SectionView {
+        SectionItemViewSpaceBetween(null) {
+          Text("Abrir la llamada en el navegador")
+          Switch(
+            checked = browser,
+            onCheckedChange = {
+              browser = it
+              ZetariaGroupCall.setUseBrowser(it)
+            }
+          )
+        }
         SectionItemView({
           val server = ZetariaGroupCall.normalizeServer(serverText)
           if (server == null) {
@@ -159,7 +181,12 @@ fun ZetariaGroupCallStartView(rhId: Long?, groupInfo: GroupInfo, close: () -> Un
             val link = ZetariaGroupCall.newRoomLink(server)
             ZetariaGroupCall.announce(rhId, groupInfo, link)
             close()
-            ZetariaGroupCall.join(link)
+            // se espera a que termine la animación de cierre: crear la pantalla de la llamada mientras otra pantalla
+            // se mueve puede dejarla en negro
+            withBGApi {
+              delay(400)
+              withContext(Dispatchers.Main) { ZetariaGroupCall.join(link) }
+            }
           }
         }) {
           Text("Iniciar llamada y avisar al grupo", color = MaterialTheme.colors.primary)
@@ -171,7 +198,7 @@ fun ZetariaGroupCallStartView(rhId: Long?, groupInfo: GroupInfo, close: () -> Un
           Text("Usar el servidor público de pruebas")
         }
       }
-      SectionTextFooter("Se publicará en el grupo un enlace a una sala nueva; quien lo toque en Zetaria entrará a la llamada.")
+      SectionTextFooter("Se publicará en el grupo un enlace a una sala nueva; quien lo toque en Zetaria entrará a la llamada. Si la llamada se ve en negro dentro de la app, activa «Abrir la llamada en el navegador».")
     }
   }
 }
