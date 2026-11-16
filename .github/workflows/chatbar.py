@@ -4,8 +4,9 @@
 1) Causa del solape: SimpleX centra el título en la pantalla (CenteredRowLayout). Con varios botones a la derecha
    (filtro de multimedia, llamada grupal de Zetaria, menú ⋮) el título centrado se metía DEBAJO de ellos.
    Ahora el título sigue centrado si cabe; si no, se desplaza a la izquierda lo justo para no pisar los botones.
-2) El nombre puede ocupar hasta dos líneas (interlineado compacto para que quepa en la barra). Si debajo del
-   nombre hay otra línea (nombre completo o nº de suscriptores), se mantiene una sola línea para no desbordar.
+2) El nombre ocupa hasta dos líneas y la letra se ajusta sola (de 16sp hasta un mínimo de 12sp) hasta que el
+   nombre completo quepa; solo si aun así no cabe termina en «…». Si debajo del nombre hay otra línea (nombre
+   completo o nº de suscriptores) se mantiene el comportamiento original de una línea.
 
 Transaccional (todo o nada). Uso: chatbar.py <ruta a apps/multiplatform>
 """
@@ -45,15 +46,40 @@ files[pc] = sub_once(
     "          cInfo.displayName, cInfo.nameBadge, fontWeight = FontWeight.SemiBold,\n"
     "          maxLines = 1, overflow = TextOverflow.Ellipsis\n"
     "        )\n",
-    "        // Zetaria: el nombre ocupa hasta dos líneas si no hay otra línea de texto debajo\n"
+    "        // Zetaria: el nombre ocupa hasta dos líneas y reduce la letra (mín. 12sp) hasta que quepa completo\n"
     "        val zetHasSecondary = (cInfo.fullName != \"\" && cInfo.fullName != cInfo.displayName && cInfo.localAlias.isEmpty()) ||\n"
     "          ((cInfo as? ChatInfo.Group)?.let { g -> g.groupInfo.useRelays && (g.groupInfo.groupSummary.publicMemberCount ?: 0L) > 0L } == true)\n"
+    "        val zetBaseSize = LocalTextStyle.current.fontSize.let { if (it.isSpecified) it else 16.sp }\n"
+    "        val zetSize = remember(cInfo.displayName) { mutableStateOf(zetBaseSize) }\n"
     "        NameWithBadge(\n"
     "          cInfo.displayName, cInfo.nameBadge, fontWeight = FontWeight.SemiBold,\n"
+    "          fontSize = if (zetHasSecondary) TextUnit.Unspecified else zetSize.value,\n"
     "          maxLines = if (zetHasSecondary) 1 else 2, overflow = TextOverflow.Ellipsis,\n"
-    "          style = LocalTextStyle.current.copy(lineHeight = if (zetHasSecondary) TextUnit.Unspecified else 18.sp)\n"
+    "          style = LocalTextStyle.current.copy(lineHeight = if (zetHasSecondary) TextUnit.Unspecified else (zetSize.value.value * 1.15f).sp),\n"
+    "          onTextLayout = { r ->\n"
+    "            if (!zetHasSecondary && r.hasVisualOverflow && zetSize.value.value > 12f) {\n"
+    "              zetSize.value = (zetSize.value.value - 1f).sp\n"
+    "            }\n"
+    "          }\n"
     "        )\n",
     "nombre en dos líneas")
+
+# NameWithBadge acepta onTextLayout (parámetro opcional, no cambia a los demás usos)
+pi = base.parent / "helpers/ChatInfoImage.kt"
+if not pi.exists():
+    sys.exit(f"ERROR [chatbar]: no existe {pi}")
+files[pi] = pi.read_text(encoding="utf-8")
+files[pi] = sub_once(
+    files[pi],
+    "  maxLines: Int = Int.MAX_VALUE,\n  style: TextStyle = LocalTextStyle.current\n) {\n  Row(modifier) {",
+    "  maxLines: Int = Int.MAX_VALUE,\n  style: TextStyle = LocalTextStyle.current,\n"
+    "  onTextLayout: (androidx.compose.ui.text.TextLayoutResult) -> Unit = {}\n) {\n  Row(modifier) {",
+    "NameWithBadge (parámetro)")
+files[pi] = sub_once(
+    files[pi],
+    "      maxLines = maxLines,\n      style = style\n    )\n    NameBadge(",
+    "      maxLines = maxLines,\n      style = style,\n      onTextLayout = onTextLayout\n    )\n    NameBadge(",
+    "NameWithBadge (uso)")
 
 for p, t in files.items():
     p.write_text(t, encoding="utf-8")
