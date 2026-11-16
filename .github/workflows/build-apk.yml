@@ -167,6 +167,14 @@ jobs:
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
+      - name: Barra del chat (el nombre del grupo no queda tapado por los botones)
+        # Transaccional (todo o nada): si no encaja con el código de SimpleX, el build sigue sin este arreglo.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name chatbar.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
       - name: Limitar a arm64 (solo tenemos el núcleo nativo de arm64)
         run: |
           sed -i 's/include("arm64-v8a", "armeabi-v7a")/include("arm64-v8a")/' src/apps/multiplatform/android/build.gradle.kts
