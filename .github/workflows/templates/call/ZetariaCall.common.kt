@@ -69,6 +69,20 @@ object ZetariaGroupCall {
     settings.putString(SERVER_KEY, value)
   }
 
+  // Sala que acabas de crear como anfitrión. En el servidor público de Jitsi, quien CREA la sala tiene que iniciar
+  // sesión (GitHub, Google...) y ese inicio de sesión no puede devolver su permiso a la página dentro de la app
+  // (error «membersOnly»), así que el anfitrión abre la sala en el navegador y los demás entran desde la app.
+  private var hostRoomUrl: String? = null
+
+  fun markHost(url: String) {
+    hostRoomUrl = url
+  }
+
+  fun isHostRoom(url: String): Boolean = hostRoomUrl == url
+
+  // ¿Este servidor obliga al anfitrión a iniciar sesión? (el público de Jitsi sí; uno propio normalmente no)
+  fun needsHostLogin(url: String): Boolean = url.startsWith("https://meet.jit.si/")
+
   // Si está activado, las llamadas se abren en el navegador del teléfono en vez de dentro de la app (más compatible)
   fun useBrowser(): Boolean = settings.getBoolean(BROWSER_KEY, false)
 
@@ -157,7 +171,7 @@ fun ZetariaGroupCallStartView(rhId: Long?, groupInfo: GroupInfo, close: () -> Un
         }
       }
       SectionTextFooter(
-        error ?: "Por defecto se usa el servidor público de Jitsi, solo para pruebas: quien lo opera ve quién se conecta, y el audio y el video pasan por él sin cifrado de extremo a extremo. Para uso real, escribe aquí la dirección de tu propio servidor."
+        error ?: "Por defecto se usa el servidor público de Jitsi, solo para pruebas: allí quien crea la sala debe iniciar sesión (GitHub, Google...), por eso como anfitrión la abrirás en el navegador y los demás entrarán desde la app. Quien opera el servidor ve quién se conecta, y el audio y el video pasan por él sin cifrado de extremo a extremo. Con tu propio servidor todo ocurre dentro de la app."
       )
       SectionDividerSpaced()
 
@@ -179,6 +193,7 @@ fun ZetariaGroupCallStartView(rhId: Long?, groupInfo: GroupInfo, close: () -> Un
           } else {
             ZetariaGroupCall.setServer(server)
             val link = ZetariaGroupCall.newRoomLink(server)
+            ZetariaGroupCall.markHost(link)
             ZetariaGroupCall.announce(rhId, groupInfo, link)
             close()
             // se espera a que termine la animación de cierre: crear la pantalla de la llamada mientras otra pantalla

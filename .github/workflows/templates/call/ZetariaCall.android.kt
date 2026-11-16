@@ -72,8 +72,11 @@ actual fun ZetariaGroupCallScreen(url: String, displayName: String, close: () ->
   val context = LocalContext.current
   val uriHandler = LocalUriHandler.current
 
-  // Modo navegador (ajuste de la pantalla «Llamada grupal»): se abre fuera de la app y se cierra esta pantalla
-  val browserMode = remember { ZetariaGroupCall.useBrowser() }
+  // Modo navegador: por el ajuste de la pantalla «Llamada grupal», o porque eres el anfitrión de una sala en un
+  // servidor que exige iniciar sesión para crearla (el inicio de sesión no funciona dentro de la app)
+  val browserMode = remember {
+    ZetariaGroupCall.useBrowser() || (ZetariaGroupCall.isHostRoom(url) && ZetariaGroupCall.needsHostLogin(url))
+  }
   if (browserMode) {
     LaunchedEffect(Unit) {
       uriHandler.openUri(url)
@@ -201,8 +204,13 @@ actual fun ZetariaGroupCallScreen(url: String, displayName: String, close: () ->
                 }
 
                 override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                  if (consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR && lastError.value == null) {
-                    lastError.value = consoleMessage.message().take(140)
+                  val text = consoleMessage.message()
+                  if (text.contains("membersOnly")) {
+                    // Jitsi no deja crear/entrar a la sala sin que el anfitrión la abra antes e inicie sesión
+                    lastError.value = "Esta sala todavía no está abierta: el anfitrión tiene que entrar primero (en meet.jit.si debe iniciar sesión y abrirla en el navegador). Inténtalo de nuevo en un momento."
+                    showHelp.value = true
+                  } else if (consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR && lastError.value == null) {
+                    lastError.value = text.take(140)
                   }
                   return super.onConsoleMessage(consoleMessage)
                 }
@@ -257,6 +265,11 @@ actual fun ZetariaGroupCallScreen(url: String, displayName: String, close: () ->
             Text(err, color = Color(0xFFB0B0C0), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
           }
           TextButton(onClick = { uriHandler.openUri(url) }) { Text("Abrir en el navegador") }
+          TextButton(onClick = {
+            lastError.value = null
+            showHelp.value = false
+            webViewHolder.value?.loadUrl(callUrl)
+          }) { Text("Reintentar") }
           TextButton(onClick = { showHelp.value = false }) { Text("Seguir esperando") }
         }
       }
