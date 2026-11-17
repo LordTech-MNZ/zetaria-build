@@ -4,12 +4,14 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -22,9 +24,13 @@ import chat.simplex.common.model.ChatController.appPrefs
 import chat.simplex.common.platform.Log
 import chat.simplex.common.platform.TAG
 import chat.simplex.common.platform.base64ToBitmap
+import chat.simplex.common.platform.getLoadedFilePath
+import chat.simplex.common.platform.getLoadedFileSource
+import chat.simplex.common.platform.openFile
 import chat.simplex.common.platform.chatModel
 import chat.simplex.common.platform.rememberFileChooserLauncher
 import chat.simplex.common.platform.resizeImageToStrSize
+import chat.simplex.common.platform.settings
 import chat.simplex.common.views.chat.topPaddingToContent
 import chat.simplex.common.views.helpers.*
 import kotlinx.coroutines.*
@@ -33,7 +39,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 // ---------------------------------------------------------------------------
-// Feed de publicaciones de Zetaria.
+// Feed de publicaciones de Zetaria (texto, imágenes y videos).
 // Sin cambios de protocolo: todo viaja como mensajes normales entre contactos.
 //
 //   Publicación          "📰 ζ·<pid>" + texto (o imagen con ese pie)   autor -> todos sus contactos
@@ -55,7 +61,11 @@ private const val ZF_REACT = "💟 ζ·"
 private const val ZF_RREL = "💠 ζ·"
 private const val ZF_MAX_TEXT = 3000
 private const val ZF_MAX_COMMENT = 1000
+private const val ZF_MAX_VIDEO_BYTES = 60L * 1024L * 1024L
 private val ZF_EMOJIS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
+/** Guarda una imagen o un video recibido en la galería, dentro de la carpeta «Zetaria». */
+expect suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean)
 
 private enum class ZfKind { POST, COMMENT, CREL, REACT, RREL }
 
@@ -113,25 +123,15 @@ private fun zfParseText(text: String): ZfHead? {
 private fun zfHeadOf(ci: ChatItem): ZfHead? {
   if (ci.meta.itemDeleted != null) return null
   val mc = ci.content.msgContent ?: return null
-  if (mc !is MsgContent.MCText && mc !is MsgContent.MCImage) return null
+  if (mc !is MsgContent.MCText && mc !is MsgContent.MCImage && mc !is MsgContent.MCVideo) return null
   val h = zfParseText(mc.text) ?: return null
-  // solo las publicaciones llevan imagen
-  if (mc is MsgContent.MCImage && h.kind != ZfKind.POST) return null
+  // solo las publicaciones llevan imagen o video
+  if ((mc is MsgContent.MCImage || mc is MsgContent.MCVideo) && h.kind != ZfKind.POST) return null
   return h
 }
 
-/** ¿Este mensaje pertenece al feed (publicación, comentario o reacción)? Se oculta del chat y de las notificaciones. */
+/** ¿Este mensaje pertenece al feed (publicación, comentario o reacción)? Se oculta del chat, de la lista y de las notificaciones. */
 fun zetariaIsFeedItem(ci: ChatItem): Boolean = zfHeadOf(ci) != null
-
-/** Texto corto para la vista previa de la lista de chats (en vez de la cabecera interna). */
-fun zetariaFeedPreviewText(ci: ChatItem): String {
-  val h = zfHeadOf(ci) ?: return ""
-  return when (h.kind) {
-    ZfKind.POST -> "📰 Publicación en el feed"
-    ZfKind.COMMENT, ZfKind.CREL -> "💬 Comentario en el feed"
-    ZfKind.REACT, ZfKind.RREL -> "💟 Reacción en el feed"
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Almacén en memoria. La verdad está en la base de datos de los chats: al abrir el feed se vuelven a
@@ -153,6 +153,7 @@ private class ZfEvent(
   val chatImage: String?,
   val sent: Boolean,
   val tsMs: Long,
+  val createdMs: Long,
   val itemId: Long,
   val ci: ChatItem
 )
@@ -163,7 +164,7 @@ private fun zfEventOf(rh: Long?, cInfo: ChatInfo, ci: ChatItem): ZfEvent? {
   return ZfEvent(
     h.kind, h.pid, h.cid, h.key, h.name, h.emoji, h.body,
     rh, cInfo.id, cInfo.contact.contactId, cInfo.displayName, cInfo.image,
-    ci.chatDir.sent, ci.meta.itemTs.toEpochMilliseconds(), ci.id, ci
+    ci.chatDir.sent, ci.meta.itemTs.toEpochMilliseconds(), ci.meta.createdAt.toEpochMilliseconds(), ci.id, ci
   )
 }
 
@@ -172,6 +173,52 @@ private var zfUserId: Long = -1L
 private val zfVersion = mutableStateOf(0)
 private val zfLoading = mutableStateOf(false)
 private val zfRefreshing = AtomicBoolean(false)
+private val zfInitialDone = AtomicBoolean(false)
+private val zfSeen = mutableStateOf(0L)
+
+private fun zfSeenKey(uid: Long): String = "zetaria_feed_seen_" + uid
+
+private fun zfSetSeen(ms: Long) {
+  zfCheckUser()
+  if (ms <= zfSeen.value) return
+  zfSeen.value = ms
+  try {
+    settings.putLong(zfSeenKey(zfUserId), ms)
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed seen: " + e.stackTraceToString())
+  }
+}
+
+/** Fecha (hora local de llegada) de la publicación ajena más reciente. */
+private fun zfNewestOthersMs(): Long {
+  var mx = 0L
+  for (m in zfEvents.values) {
+    for (e in m.values) {
+      if (e.kind == ZfKind.POST && !e.sent && e.createdMs > mx) mx = e.createdMs
+    }
+  }
+  return mx
+}
+
+private fun zfUnseenCount(): Int {
+  val seen = zfSeen.value
+  var n = 0
+  for (m in zfEvents.values) {
+    for (e in m.values) {
+      if (e.kind == ZfKind.POST && !e.sent && e.createdMs > seen) n++
+    }
+  }
+  return n
+}
+
+/** La primera vez, lo que ya existe cuenta como visto: el aviso solo marca lo nuevo. */
+private fun zfInitSeen() {
+  zfCheckUser()
+  if (zfSeen.value == 0L) {
+    val mx = zfNewestOthersMs()
+    zfSetSeen(if (mx > 0L) mx else System.currentTimeMillis())
+  }
+}
 
 private fun zfBump() {
   zfVersion.value = zfVersion.value + 1
@@ -182,6 +229,11 @@ private fun zfCheckUser() {
   if (uid != zfUserId) {
     zfEvents.clear()
     zfUserId = uid
+    zfSeen.value = try {
+      settings.getLong(zfSeenKey(uid), 0L)
+    } catch (e: Exception) {
+      0L
+    }
   }
 }
 
@@ -383,6 +435,7 @@ private suspend fun zfRefresh() {
       }
       withContext(Dispatchers.Main) { zfSetChat(chat.chatInfo.id, list) }
     }
+    withContext(Dispatchers.Main) { zfInitSeen() }
   } catch (e: Exception) {
     Log.e(TAG, "zetaria feed refresh: " + e.stackTraceToString())
   } finally {
@@ -418,17 +471,24 @@ private suspend fun zfSendOne(c: Chat, mc: MsgContent, file: CryptoFile?): Boole
 }
 
 /** Publica en el feed. Devuelve null si salió bien, o el motivo del error. */
-private suspend fun zfPublish(text: String, image: URI?): String? {
+private suspend fun zfPublish(text: String, media: URI?, video: Boolean): String? {
   val targets = withContext(Dispatchers.Main) { zfTargets() }
   if (targets.isEmpty()) return "Aún no tienes contactos conectados a quienes publicar."
   val caption = ZF_POST + zfNewId(10) + (if (text.isEmpty()) "" else "\n" + text)
   var mc: MsgContent = MsgContent.MCText(caption)
   var file: CryptoFile? = null
-  if (image != null) {
-    val bmp = getBitmapFromUri(image) ?: return "No se pudo leer la imagen."
+  if (media != null && !video) {
+    val bmp = getBitmapFromUri(media) ?: return "No se pudo leer la imagen."
     val preview = resizeImageToStrSize(bmp, maxDataSize = 14000)
     file = saveImage(bmp) ?: return "No se pudo preparar la imagen."
     mc = MsgContent.MCImage(caption, preview)
+  } else if (media != null) {
+    val pd = getBitmapFromVideo(media, withAlertOnException = false)
+    val frame = pd.preview ?: return "No se pudo leer el video."
+    val secs = ((pd.duration ?: 0L) / 1000L).toInt()
+    val preview = resizeImageToStrSize(frame, maxDataSize = 14000)
+    file = saveFileFromUri(media, ZF_MAX_VIDEO_BYTES, hiddenFileNamePrefix = "video") ?: return "No se pudo preparar el video (máximo 60 MB)."
+    mc = MsgContent.MCVideo(caption, preview, secs)
   }
   var ok = 0
   for (c in targets) {
@@ -488,7 +548,6 @@ private suspend fun zfHandleIncoming(rhId: Long?, user: UserLike, cInfo: ChatInf
   val active = withContext(Dispatchers.Main) { chatModel.currentUser.value?.userId == user.userId }
   if (!active) return
   if (ci.isRcvNew) {
-    withContext(Dispatchers.Main) { chatModel.chatsContext.markChatItemsRead(rhId, cInfo.id, listOf(ci.id)) }
     val updated = chatModel.controller.apiChatItemsRead(rhId, cInfo.chatType, cInfo.apiId, cInfo.groupChatScope(), listOf(ci.id))
     if (updated != null) {
       withContext(Dispatchers.Main) { chatModel.chatsContext.updateChatInfo(rhId, updated) }
@@ -534,6 +593,51 @@ private suspend fun zfHandleIncoming(rhId: Long?, user: UserLike, cInfo: ChatInf
 }
 
 // ---------------------------------------------------------------------------
+// Lista de chats: la fila de un contacto no muestra la publicación enviada; se muestra su último mensaje real.
+// (Dentro de la sesión los mensajes del feed ni siquiera entran al modelo; esto cubre lo que la base de datos
+// devuelve como «último mensaje» al reiniciar la app.)
+// ---------------------------------------------------------------------------
+private val zfPreviewCache = HashMap<String, ChatItem?>()
+
+private suspend fun zfLastRealItem(chat: Chat): ChatItem? {
+  val res = chatModel.controller.apiGetChat(
+    rh = chat.remoteHostId,
+    type = ChatType.Direct,
+    id = chat.chatInfo.apiId,
+    scope = null,
+    pagination = ChatPagination.Last(40)
+  ) ?: return null
+  return res.first.chatItems.lastOrNull { !zetariaIsFeedItem(it) }
+}
+
+@Composable
+fun zetariaPreviewChat(chat: Chat): Chat {
+  val last = chat.chatItems.lastOrNull()
+  if (last == null || chat.chatInfo !is ChatInfo.Direct || !zetariaIsFeedItem(last)) return chat
+  val key = chat.id + ":" + last.id
+  var repl by remember(key) { mutableStateOf(zfPreviewCache[key]) }
+  var done by remember(key) { mutableStateOf(zfPreviewCache.containsKey(key)) }
+  LaunchedEffect(key) {
+    if (!done) {
+      val found = withContext(Dispatchers.IO) {
+        try {
+          zfLastRealItem(chat)
+        } catch (e: Exception) {
+          null
+        }
+      }
+      withContext(Dispatchers.Main) {
+        zfPreviewCache[key] = found
+        repl = found
+        done = true
+      }
+    }
+  }
+  val r = repl
+  return chat.copy(chatItems = if (r != null) arrayListOf(r) else arrayListOf<ChatItem>())
+}
+
+// ---------------------------------------------------------------------------
 // Interfaz: pestañas "Chats | Feed" en la barra superior
 // ---------------------------------------------------------------------------
 val zetariaFeedOpen: MutableState<Boolean> = mutableStateOf(false)
@@ -543,6 +647,14 @@ fun ZetariaFeedTabs(chatsTitle: String) {
   val open = zetariaFeedOpen.value
   val onBg = MaterialTheme.colors.onBackground
   val secondary = MaterialTheme.colors.secondary
+  val ready = chatModel.chats.value.isNotEmpty()
+  val unseen = remember(zfVersion.value, zfSeen.value) { zfUnseenCount() }
+  // una sola lectura al arrancar, para saber si hay publicaciones nuevas aunque no abras el feed
+  LaunchedEffect(ready) {
+    if (ready && zfInitialDone.compareAndSet(false, true)) {
+      withContext(Dispatchers.IO) { zfRefresh() }
+    }
+  }
   Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
     Text(
       chatsTitle,
@@ -556,6 +668,18 @@ fun ZetariaFeedTabs(chatsTitle: String) {
       fontWeight = if (open) FontWeight.SemiBold else FontWeight.Normal,
       modifier = Modifier.clickable { zetariaFeedOpen.value = true }
     )
+    if (unseen > 0 && !open) {
+      Box(
+        Modifier
+          .size(18.dp)
+          .clip(CircleShape)
+          .background(MaterialTheme.colors.primary)
+          .clickable { zetariaFeedOpen.value = true },
+        contentAlignment = Alignment.Center
+      ) {
+        Text(if (unseen > 9) "9+" else unseen.toString(), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+      }
+    }
   }
 }
 
@@ -574,6 +698,8 @@ fun ZetariaFeedScreen() {
   val scope = rememberCoroutineScope()
 
   LaunchedEffect(Unit) { withContext(Dispatchers.IO) { zfRefresh() } }
+  // mientras el feed está abierto, todo lo que llega cuenta como visto
+  LaunchedEffect(version) { zfSetSeen(zfNewestOthersMs()) }
 
   LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = topPad, bottom = bottomPad + 16.dp)) {
     item(key = "composer") {
@@ -631,34 +757,50 @@ fun ZetariaFeedScreen() {
 }
 
 @Composable
-private fun ZfPostImage(p: ZfPost) {
-  val mc = p.ci.content.msgContent as? MsgContent.MCImage ?: return
+private fun ZfPostMedia(p: ZfPost) {
+  val mc = p.ci.content.msgContent
+  val isVideo = mc is MsgContent.MCVideo
+  val previewStr = when (mc) {
+    is MsgContent.MCImage -> mc.image
+    is MsgContent.MCVideo -> mc.image
+    else -> return
+  }
+  val durationSec = (mc as? MsgContent.MCVideo)?.duration ?: 0
   val file = p.ci.file
   var full by remember(p.ci.id) { mutableStateOf<ImageBitmap?>(null) }
+  var loadedFile by remember(p.ci.id) { mutableStateOf<CIFile?>(null) }
   var attempt by remember(p.ci.id) { mutableStateOf(0) }
-  val previewBmp = remember(mc.image) {
+  val previewBmp = remember(previewStr) {
     try {
-      base64ToBitmap(mc.image)
+      base64ToBitmap(previewStr)
     } catch (e: Exception) {
       null
     }
   }
 
-  // Se vuelve a comprobar el disco cada pocos segundos: la imagen puede terminar de descargarse con el feed abierto
+  // Se vuelve a comprobar el disco cada pocos segundos: el archivo puede terminar de descargarse con el feed abierto
   LaunchedEffect(p.ci.id, attempt) {
-    if (file == null || full != null) return@LaunchedEffect
+    if (file == null || loadedFile != null) return@LaunchedEffect
     var tries = 0
-    while (tries < 30) {
+    while (tries < 40) {
       val probe = if (file.fileStatus.sent) file else file.copy(fileStatus = CIFileStatus.RcvComplete)
-      val b = withContext(Dispatchers.IO) {
+      var bmp: ImageBitmap? = null
+      var ready = false
+      withContext(Dispatchers.IO) {
         try {
-          getLoadedImage(probe)?.first
+          if (isVideo) {
+            ready = getLoadedFilePath(probe) != null
+          } else {
+            bmp = getLoadedImage(probe)?.first
+            ready = bmp != null
+          }
         } catch (e: Exception) {
-          null
+          ready = false
         }
       }
-      if (b != null) {
-        full = b
+      if (ready) {
+        full = bmp
+        loadedFile = probe
         break
       }
       tries++
@@ -666,37 +808,65 @@ private fun ZfPostImage(p: ZfPost) {
     }
   }
 
-  val bmp = full ?: previewBmp
-  if (bmp != null) {
+  val shown = full ?: previewBmp
+  if (shown != null) {
+    val lf = loadedFile
+    val waiting = lf == null && file != null && file.fileStatus is CIFileStatus.RcvInvitation
     Spacer(Modifier.height(8.dp))
     Box(Modifier.fillMaxWidth()) {
       Image(
-        bmp,
+        shown,
         null,
         Modifier
           .fillMaxWidth()
           .heightIn(max = 420.dp)
           .clip(RoundedCornerShape(10.dp))
-          .clickable(enabled = file != null && full == null && file.fileStatus is CIFileStatus.RcvInvitation) {
-            val u = chatModel.currentUser.value
-            if (u != null && file != null) {
-              withLongRunningApi {
-                chatModel.controller.receiveFiles(p.rh, u, listOf(file.fileId), userApprovedRelays = false, auto = false)
-                withContext(Dispatchers.Main) { attempt = attempt + 1 }
+          .clickable(enabled = waiting || (isVideo && lf != null)) {
+            if (isVideo && lf != null) {
+              val src = getLoadedFileSource(lf)
+              if (src != null) openFile(src)
+            } else if (waiting && file != null) {
+              val u = chatModel.currentUser.value
+              if (u != null) {
+                withLongRunningApi {
+                  chatModel.controller.receiveFiles(p.rh, u, listOf(file.fileId), userApprovedRelays = false, auto = false)
+                  withContext(Dispatchers.Main) { attempt = attempt + 1 }
+                }
               }
             }
           },
         contentScale = ContentScale.Fit
       )
-      if (full == null && file != null && file.fileStatus is CIFileStatus.RcvInvitation) {
+      if (waiting) {
         Text(
-          "Toca para descargar",
+          if (isVideo) "⬇ Toca para descargar el video" else "Toca para descargar",
           Modifier.align(Alignment.Center),
-          fontSize = 13.sp,
+          fontSize = 14.sp,
           fontWeight = FontWeight.Bold,
           color = MaterialTheme.colors.primary
         )
+      } else if (isVideo && lf != null) {
+        Text("▶", Modifier.align(Alignment.Center), fontSize = 48.sp, color = Color.White)
       }
+      if (isVideo && durationSec > 0) {
+        Text(
+          (durationSec / 60).toString() + ":" + (durationSec % 60).toString().padStart(2, '0'),
+          Modifier.align(Alignment.BottomEnd).padding(8.dp),
+          fontSize = 12.sp,
+          fontWeight = FontWeight.Bold,
+          color = Color.White
+        )
+      }
+    }
+    if (lf != null) {
+      Text(
+        "⬇ Guardar en la galería (Zetaria)",
+        fontSize = 13.sp,
+        color = MaterialTheme.colors.primary,
+        modifier = Modifier
+          .clickable { withLongRunningApi { zetariaSaveToGallery(lf, isVideo) } }
+          .padding(vertical = 8.dp)
+      )
     }
   }
 }
@@ -736,7 +906,7 @@ private fun ZfPostCard(p: ZfPost) {
       Spacer(Modifier.height(8.dp))
       Text(p.text, fontSize = 15.sp, color = onBg)
     }
-    ZfPostImage(p)
+    ZfPostMedia(p)
     Spacer(Modifier.height(10.dp))
     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
       for (em in ZF_EMOJIS) {
@@ -820,23 +990,46 @@ private fun ZfPostCard(p: ZfPost) {
 @Composable
 private fun ZfPublishDialog(onDismiss: () -> Unit) {
   var text by remember { mutableStateOf("") }
-  var imageUri by remember { mutableStateOf<URI?>(null) }
+  var mediaUri by remember { mutableStateOf<URI?>(null) }
+  var mediaVideo by remember { mutableStateOf(false) }
   var preview by remember { mutableStateOf<ImageBitmap?>(null) }
   var busy by remember { mutableStateOf(false) }
   var error by remember { mutableStateOf<String?>(null) }
   val targetCount = remember { zfTargets().size }
   val scope = rememberCoroutineScope()
-  val picker = rememberFileChooserLauncher(true) { uri: URI? ->
+  val pickImage = rememberFileChooserLauncher(true) { uri: URI? ->
     if (uri != null) {
       scope.launch(Dispatchers.IO) {
         val bmp = getBitmapFromUri(uri, withAlertOnException = false)
         withContext(Dispatchers.Main) {
           if (bmp != null) {
-            imageUri = uri
+            mediaUri = uri
+            mediaVideo = false
             preview = bmp
             error = null
           } else {
             error = "No se pudo leer la imagen."
+          }
+        }
+      }
+    }
+  }
+  val pickVideo = rememberFileChooserLauncher(true) { uri: URI? ->
+    if (uri != null) {
+      scope.launch(Dispatchers.IO) {
+        val frame = try {
+          getBitmapFromVideo(uri, withAlertOnException = false).preview
+        } catch (e: Exception) {
+          null
+        }
+        withContext(Dispatchers.Main) {
+          if (frame != null) {
+            mediaUri = uri
+            mediaVideo = true
+            preview = frame
+            error = null
+          } else {
+            error = "No se pudo leer el video."
           }
         }
       }
@@ -865,26 +1058,40 @@ private fun ZfPublishDialog(onDismiss: () -> Unit) {
         val pv = preview
         if (pv != null) {
           Spacer(Modifier.height(10.dp))
-          Image(pv, null, Modifier.fillMaxWidth().heightIn(max = 260.dp).clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.Fit)
+          Box(Modifier.fillMaxWidth()) {
+            Image(pv, null, Modifier.fillMaxWidth().heightIn(max = 260.dp).clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.Fit)
+            if (mediaVideo) {
+              Text("▶", Modifier.align(Alignment.Center), fontSize = 40.sp, color = Color.White)
+            }
+          }
           Text(
-            "✕ Quitar imagen",
+            if (mediaVideo) "✕ Quitar video" else "✕ Quitar imagen",
             color = MaterialTheme.colors.error,
             fontSize = 13.sp,
             modifier = Modifier
               .clickable(enabled = !busy) {
-                imageUri = null
+                mediaUri = null
                 preview = null
               }
               .padding(vertical = 8.dp)
           )
         } else {
-          Text(
-            "📷 Añadir imagen",
-            color = primary,
-            modifier = Modifier
-              .clickable(enabled = !busy) { scope.launch { picker.launch("image/*") } }
-              .padding(vertical = 12.dp)
-          )
+          Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            Text(
+              "📷 Imagen",
+              color = primary,
+              modifier = Modifier
+                .clickable(enabled = !busy) { scope.launch { pickImage.launch("image/*") } }
+                .padding(vertical = 10.dp)
+            )
+            Text(
+              "🎬 Video",
+              color = primary,
+              modifier = Modifier
+                .clickable(enabled = !busy) { scope.launch { pickVideo.launch("video/*") } }
+                .padding(vertical = 10.dp)
+            )
+          }
         }
         val err = error
         if (err != null) {
@@ -898,13 +1105,14 @@ private fun ZfPublishDialog(onDismiss: () -> Unit) {
           TextButton(
             onClick = {
               val t = text.trim()
-              val u = imageUri
+              val u = mediaUri
+              val v = mediaVideo
               busy = true
               error = null
               withLongRunningApi {
                 var res: String? = "No se pudo publicar."
                 try {
-                  res = zfPublish(t, u)
+                  res = zfPublish(t, u, v)
                 } catch (e: Exception) {
                   Log.e(TAG, "zetaria feed publish: " + e.stackTraceToString())
                 } finally {
@@ -915,7 +1123,7 @@ private fun ZfPublishDialog(onDismiss: () -> Unit) {
                 }
               }
             },
-            enabled = !busy && (text.isNotBlank() || imageUri != null)
+            enabled = !busy && (text.isNotBlank() || mediaUri != null)
           ) { Text("Publicar") }
         }
       }
