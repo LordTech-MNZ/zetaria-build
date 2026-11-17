@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Zetaria: Feed de publicaciones (pestaña «Feed» al lado de «Chats»).
 
-- Publicaciones con texto e imagen de la gente que tienes agregada, de más nueva a más antigua.
+- Publicaciones con texto, imágenes y videos de la gente que tienes agregada, de más nueva a más antigua.
+- Imágenes y videos se pueden guardar en la galería, en la carpeta «Zetaria».
+- Aviso (globito con número) en la pestaña «Feed» cuando hay publicaciones nuevas.
 - Reacciones (👍 ❤️ 😂 😮 😢 🙏) y comentarios, visibles para todos los que recibieron la publicación
   (el autor reenvía lo que recibe al resto de sus contactos).
 - Sin cambios de protocolo: todo son mensajes normales con una cabecera (ver ZetariaFeed.kt).
-- Los mensajes del feed se ocultan del chat, de la vista previa de la lista y de las notificaciones.
+- Los mensajes del feed no se ven en el chat, no mueven ni cambian la fila de la lista de chats, no cuentan como
+  «sin leer» y no generan notificaciones.
 
 Transaccional (todo o nada). Uso: feed.py <ruta a apps/multiplatform>
 """
@@ -83,19 +86,27 @@ once(p,
      "botón de chat nuevo")
 add_import(p, IMP_FN + "*")
 
-# 2) Vista previa de la lista: texto corto en vez de la cabecera interna
+# 2) Lista de chats: la fila muestra el último mensaje real, no la publicación enviada
 p = load(f"{K}/views/chatlist/ChatPreviewView.kt")
 once(p,
-     "        else -> ci.text(chat.chatInfo.isChannel) to null\n",
-     "        zetariaIsFeedItem(ci) -> zetariaFeedPreviewText(ci) to null\n"
-     "        else -> ci.text(chat.chatInfo.isChannel) to null\n",
-     "texto de la vista previa")
-once(p,
-     "        else -> ci.formattedText\n",
-     "        zetariaIsFeedItem(ci) -> null\n"
-     "        else -> ci.formattedText\n",
-     "formato de la vista previa")
+     "  defaultClickAction: () -> Unit\n) {\n  val cInfo = chat.chatInfo\n",
+     "  defaultClickAction: () -> Unit\n) {\n  val chat = zetariaPreviewChat(chat)\n  val cInfo = chat.chatInfo\n",
+     "inicio de ChatPreviewView")
 add_import(p, IMP_FN + "*")
+
+# 2b) Los mensajes del feed no entran al modelo de la lista (ni suben el chat, ni cuentan como sin leer)
+p = load(f"{K}/model/ChatModel.kt")
+once(p,
+     "    suspend fun addChatItem(rhId: Long?, chatInfo: ChatInfo, cItem: ChatItem) {\n",
+     "    suspend fun addChatItem(rhId: Long?, chatInfo: ChatInfo, cItem: ChatItem) {\n"
+     "      if (chatInfo is ChatInfo.Direct && zetariaIsFeedItem(cItem)) return\n",
+     "addChatItem")
+once(p,
+     "    suspend fun upsertChatItem(rhId: Long?, cInfo: ChatInfo, cItem: ChatItem): Boolean {\n",
+     "    suspend fun upsertChatItem(rhId: Long?, cInfo: ChatInfo, cItem: ChatItem): Boolean {\n"
+     "      if (cInfo is ChatInfo.Direct && zetariaIsFeedItem(cItem)) return false\n",
+     "upsertChatItem")
+add_import(p, IMP_FN + "zetariaIsFeedItem")
 
 # 3) Dentro del chat los mensajes del feed no se dibujan
 p = load(f"{K}/views/chat/ChatView.kt")
@@ -131,15 +142,22 @@ once(p,
      "llegada de mensajes nuevos")
 add_import(p, IMP_FN + "zetariaFeedOnNewItem")
 
-# 6) Archivo nuevo
-new_file = base / K / "views/chat/item/ZetariaFeed.kt"
-if new_file.exists():
-    die("ZetariaFeed.kt ya existe")
-src = (tpl / "ZetariaFeed.kt").read_text(encoding="utf-8")
+# 6) Archivos nuevos (común, Android y, si existe, escritorio)
+d = f"{K}/views/chat/item"
+new_files = {
+    base / d / "ZetariaFeed.kt": (tpl / "ZetariaFeed.kt").read_text(encoding="utf-8"),
+    mp / "common/src/androidMain" / d / "ZetariaFeed.android.kt": (tpl / "ZetariaFeed.android.kt").read_text(encoding="utf-8"),
+}
+if (mp / "common/src/desktopMain").exists():
+    new_files[mp / "common/src/desktopMain" / d / "ZetariaFeed.desktop.kt"] = (tpl / "ZetariaFeed.desktop.kt").read_text(encoding="utf-8")
+for f in new_files:
+    if f.exists():
+        die(f"{f.name} ya existe")
 
 for pth, txt in edits.items():
     if txt != orig[pth]:
         pth.write_text(txt, encoding="utf-8")
-new_file.parent.mkdir(parents=True, exist_ok=True)
-new_file.write_text(src, encoding="utf-8")
-print(f"   [feed] listo: {sum(1 for q in edits if edits[q] != orig[q])} archivos modificados, 1 nuevo")
+for pth, txt in new_files.items():
+    pth.parent.mkdir(parents=True, exist_ok=True)
+    pth.write_text(txt, encoding="utf-8")
+print(f"   [feed] listo: {sum(1 for q in edits if edits[q] != orig[q])} archivos modificados, {len(new_files)} nuevos")
