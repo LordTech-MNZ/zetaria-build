@@ -186,6 +186,14 @@ jobs:
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
+      - name: Animación de arranque (fondo cósmico, estrellas y símbolo MNZ en HD)
+        # Transaccional (todo o nada); la parte de la pantalla de inicio del sistema se omite sola si no encaja.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name boot.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
       - name: Limitar a arm64 (solo tenemos el núcleo nativo de arm64)
         run: |
           sed -i 's/include("arm64-v8a", "armeabi-v7a")/include("arm64-v8a")/' src/apps/multiplatform/android/build.gradle.kts

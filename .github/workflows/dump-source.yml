@@ -35,6 +35,11 @@ jobs:
           find java -name '*.kt' > /tmp/files-android.txt
           find res -type f | sort > res-list.txt
           echo res-list.txt >> /tmp/files-android.txt
+          # Manifiesto, temas y gradle (para revisar la pantalla de inicio del sistema)
+          cp ../../build.gradle.kts android-build.gradle.kts 2>/dev/null && echo android-build.gradle.kts >> /tmp/files-android.txt || true
+          for f in AndroidManifest.xml res/values/themes.xml res/values-night/themes.xml res/values/colors.xml; do
+            [ -f "$f" ] && echo "$f" >> /tmp/files-android.txt
+          done
           echo "Archivos android: $(wc -l < /tmp/files-android.txt)"
           zip -q /tmp/out/simplex-android-source.zip -@ < /tmp/files-android.txt
           ls -la /tmp/out
