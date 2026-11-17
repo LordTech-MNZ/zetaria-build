@@ -44,10 +44,18 @@ app = K / "App.kt"
 if not app.exists():
     fail("no existe App.kt")
 t = app.read_text(encoding="utf-8")
-anchor = "            MainScreen()\n          }\n        }\n"
-if t.count(anchor) != 1:
-    fail(f"AppScreen: el texto esperado aparece {t.count(anchor)} veces en App.kt (debía ser 1)")
-t = t.replace(anchor, anchor + "        ZetariaBootOverlay()\n", 1)
+# Otros parches (updater.py) añaden líneas justo debajo de MainScreen(): se aceptan tal cual.
+anchor_rx = re.compile(
+    r"^ {12}MainScreen\(\)\n"                       # MainScreen()
+    r"(?: {12}//[^\n]*\n)?"                           # comentario de otro parche (opcional)
+    r"(?: {12}[\w.]*ZetariaUpdateHost\(\)\n)?"        # aviso de actualización (opcional)
+    r" {10}\}\n {8}\}\n",                            # cierre de los dos Box
+    re.M)
+hits = anchor_rx.findall(t)
+if len(hits) != 1:
+    fail(f"AppScreen: el bloque esperado aparece {len(hits)} veces en App.kt (debía ser 1)")
+m = anchor_rx.search(t)
+t = t[:m.end()] + "        ZetariaBootOverlay()\n" + t[m.end():]
 imp = "import chat.simplex.res.MR\n"
 if t.count(imp) != 1:
     fail(f"App.kt: import esperado aparece {t.count(imp)} veces (debía ser 1)")
