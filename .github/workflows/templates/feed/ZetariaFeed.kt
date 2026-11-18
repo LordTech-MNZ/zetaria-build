@@ -24,6 +24,7 @@ import chat.simplex.common.model.*
 import chat.simplex.common.model.ChatController.appPrefs
 import chat.simplex.common.platform.Log
 import chat.simplex.common.platform.TAG
+import chat.simplex.common.platform.VideoPlayer
 import chat.simplex.common.platform.VideoPlayerHolder
 import chat.simplex.common.platform.base64ToBitmap
 import chat.simplex.common.platform.chatModel
@@ -51,9 +52,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 //   Comentario reenviado "🗨 ζ·<pid> <cid> <clave> <nombre>"           autor -> demás contactos
 //   Reacción             "💟 ζ·<pid> <emoji>"  ("-" = quitar)          lector -> autor
 //   Reacción reenviada   "💠 ζ·<pid> <clave> <emoji> <nombre>"         autor -> demás contactos
+//   Eliminar publicación "🗑 ζ·<pid>"                                  autor -> todos sus contactos
 //
 // Después de la primera línea pueden venir líneas de datos opcionales:
-//   "↪ <cid>"       responde a ese comentario
+//   "↪ <cid>"       responde a ese comentario (o, en una reacción, reacciona a ese comentario)
 //   "🪪 <imagen>"   foto de perfil en miniatura de quien comenta o reacciona
 //   "🕒 <segundos>" fecha original (al reenviar publicaciones antiguas a un contacto nuevo)
 // y luego el texto. Publicaciones y comentarios pueden llevar una imagen o un video adjunto.
@@ -69,6 +71,7 @@ private const val ZF_COMMENT = "💬 ζ·"
 private const val ZF_CREL = "🗨 ζ·"
 private const val ZF_REACT = "💟 ζ·"
 private const val ZF_RREL = "💠 ζ·"
+private const val ZF_DEL = "🗑 ζ·"
 private const val ZF_META_REPLY = "↪ "
 private const val ZF_META_AVATAR = "🪪 "
 private const val ZF_META_TIME = "🕒 "
@@ -81,9 +84,12 @@ private const val ZF_AUTOSAVE_KEY = "zetaria_auto_save_images"
 private val ZF_EMOJIS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 
 /** Guarda una imagen o un video recibido en la galería, dentro de la carpeta «Zetaria». */
-expect suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean, quiet: Boolean)
+expect suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean, feed: Boolean, quiet: Boolean)
 
-private enum class ZfKind { POST, COMMENT, CREL, REACT, RREL }
+/** Mueve la reproducción de un video a una posición (milisegundos). */
+expect fun zetariaVideoSeek(player: VideoPlayer, positionMs: Long)
+
+private enum class ZfKind { POST, COMMENT, CREL, REACT, RREL, DEL }
 
 private class ZfHead(
   val kind: ZfKind,
@@ -148,13 +154,18 @@ private fun zfParseText(text: String): ZfHead? {
   if (head.startsWith(ZF_REACT)) {
     val parts = head.substring(ZF_REACT.length).trim().split(" ")
     if (parts.size != 2 || !zfPidRe.matches(parts[0]) || !zfValidEmoji(parts[1])) return null
-    return ZfHead(ZfKind.REACT, parts[0], "", "", "", parts[1], "", "", "", 0L)
+    return ZfHead(ZfKind.REACT, parts[0], "", "", "", parts[1], "", reply, "", 0L)
   }
   if (head.startsWith(ZF_RREL)) {
     val parts = head.substring(ZF_RREL.length).trim().split(" ", limit = 4)
     if (parts.size < 3 || !zfPidRe.matches(parts[0]) || !zfKeyRe.matches(parts[1]) || !zfValidEmoji(parts[2])) return null
     val name = if (parts.size > 3) parts[3].trim() else ""
-    return ZfHead(ZfKind.RREL, parts[0], "", parts[1], name, parts[2], "", "", avatar, origSec)
+    return ZfHead(ZfKind.RREL, parts[0], "", parts[1], name, parts[2], "", reply, avatar, origSec)
+  }
+  if (head.startsWith(ZF_DEL)) {
+    val pid = head.substring(ZF_DEL.length).trim()
+    if (!zfPidRe.matches(pid)) return null
+    return ZfHead(ZfKind.DEL, pid, "", "", "", "", "", "", "", 0L)
   }
   return null
 }
@@ -284,16 +295,6 @@ private fun zfAutoSaveOn(): Boolean {
   return zfAutoSave.value
 }
 
-private fun zfSetAutoSave(v: Boolean) {
-  zfAutoSaveLoaded = true
-  zfAutoSave.value = v
-  try {
-    settings.putBoolean(ZF_AUTOSAVE_KEY, v)
-  } catch (e: Exception) {
-    Log.e(TAG, "zetaria feed autosave pref: " + e.stackTraceToString())
-  }
-}
-
 private fun zfBump() {
   zfVersion.value = zfVersion.value + 1
 }
@@ -379,7 +380,11 @@ private class ZfComment(
   val mine: Boolean,
   val ci: ChatItem,
   val rh: Long?
-)
+) {
+  var counts: Map<String, Int> = emptyMap()
+  var myReaction: String? = null
+  var reactors: List<ZfReactor> = emptyList()
+}
 
 private class ZfReactor(val key: String, val name: String, val emoji: String, val avatar: String?)
 
@@ -405,6 +410,7 @@ private class ZfReact(val tsMs: Long, val emoji: String, val name: String, val a
 private class ZfAcc(val key: String, var ev: ZfEvent, val mine: Boolean) {
   val comments = HashMap<String, ZfComment>()
   val reacts = HashMap<String, ZfReact>()
+  val creacts = HashMap<String, HashMap<String, ZfReact>>()   // comentario -> quien -> reacción
   val chats = HashSet<String>()
 }
 
@@ -416,8 +422,26 @@ private fun zfAddComment(a: ZfAcc, e: ZfEvent, key: String, name: String, avatar
 }
 
 private fun zfAddReact(a: ZfAcc, e: ZfEvent, reactor: String, name: String, avatar: String?) {
-  val prev = a.reacts[reactor]
-  if (prev == null || e.tsMs >= prev.tsMs) a.reacts[reactor] = ZfReact(e.tsMs, e.emoji, name, avatar)
+  val map = if (e.reply.isEmpty()) a.reacts else a.creacts.getOrPut(e.reply) { HashMap() }
+  val prev = map[reactor]
+  if (prev == null || e.tsMs >= prev.tsMs) map[reactor] = ZfReact(e.tsMs, e.emoji, name, avatar)
+}
+
+/** ¿Eliminé yo esta publicación? (se recuerda en el teléfono por si no hay a quién avisar) */
+private fun zfDeletedLocalKey(pid: String): String = "zetaria_feed_del_" + zfUserId + "_" + pid
+
+private fun zfIsDeletedLocal(pid: String): Boolean = try {
+  settings.getBoolean(zfDeletedLocalKey(pid), false)
+} catch (e: Exception) {
+  false
+}
+
+private fun zfMarkDeletedLocal(pid: String) {
+  try {
+    settings.putBoolean(zfDeletedLocalKey(pid), true)
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed delete flag: " + e.stackTraceToString())
+  }
 }
 
 private fun zfRelayedAvatar(e: ZfEvent): String? =
@@ -430,6 +454,13 @@ private fun zfBuildPosts(): List<ZfPost> {
   val myImage = me?.image
   val mineAcc = HashMap<String, ZfAcc>()   // pid -> publicación mía
   val theirAcc = HashMap<String, ZfAcc>()  // "pid|chat" -> publicación de un contacto
+  val deletedMine = HashSet<String>()      // pid de publicaciones mías eliminadas
+  val deletedTheirs = HashSet<String>()    // "pid|chat" de publicaciones eliminadas por su autor
+  for (e in all) {
+    if (e.kind == ZfKind.DEL) {
+      if (e.sent) deletedMine.add(e.pid) else deletedTheirs.add(e.pid + "|" + e.chatId)
+    }
+  }
   for (e in all) {
     if (e.kind != ZfKind.POST) continue
     if (e.sent) {
@@ -444,6 +475,7 @@ private fun zfBuildPosts(): List<ZfPost> {
   for (e in all) {
     when (e.kind) {
       ZfKind.POST -> {}
+      ZfKind.DEL -> {}
       ZfKind.COMMENT -> {
         if (!e.sent) {
           // un contacto comenta una publicación mía
@@ -488,6 +520,8 @@ private fun zfBuildPosts(): List<ZfPost> {
   }
   val res = ArrayList<ZfPost>()
   for (a in mineAcc.values + theirAcc.values) {
+    if (a.mine && (deletedMine.contains(a.ev.pid) || zfIsDeletedLocal(a.ev.pid))) continue
+    if (!a.mine && deletedTheirs.contains(a.key)) continue
     val counts = HashMap<String, Int>()
     val reactors = ArrayList<ZfReactor>()
     for (en in a.reacts.entries) {
@@ -497,6 +531,21 @@ private fun zfBuildPosts(): List<ZfPost> {
       reactors.add(ZfReactor(en.key, r.name, r.emoji, r.avatar))
     }
     val myKey = if (a.mine) "a" else "me"
+    for (cm in a.comments.values) {
+      val cr = a.creacts[cm.cid] ?: continue
+      val cc = HashMap<String, Int>()
+      val rs = ArrayList<ZfReactor>()
+      for (en in cr.entries) {
+        val r = en.value
+        if (r.emoji == "-") continue
+        cc[r.emoji] = (cc[r.emoji] ?: 0) + 1
+        rs.add(ZfReactor(en.key, r.name, r.emoji, r.avatar))
+      }
+      cm.counts = cc
+      cm.reactors = rs
+      val my = cr[myKey]?.emoji
+      cm.myReaction = if (my == null || my == "-") null else my
+    }
     val mr = a.reacts[myKey]?.emoji
     res.add(
       ZfPost(
@@ -524,10 +573,13 @@ private fun zfBuildPosts(): List<ZfPost> {
 // ---------------------------------------------------------------------------
 // Lectura: se vuelven a cargar los mensajes del feed de cada contacto
 // ---------------------------------------------------------------------------
-private suspend fun zfRefresh() {
-  if (!zfRefreshing.compareAndSet(false, true)) return
+/** Devuelve true si se leyeron todos los chats sin errores. */
+private suspend fun zfRefresh(): Boolean {
+  if (!zfRefreshing.compareAndSet(false, true)) return false
   withContext(Dispatchers.Main) { zfLoading.value = true }
+  var complete = false
   try {
+    var allRead = true
     val chats = withContext(Dispatchers.Main) { zfReadable() }
     for (c in chats) {
       val res = chatModel.controller.apiGetChat(
@@ -537,7 +589,11 @@ private suspend fun zfRefresh() {
         scope = null,
         pagination = ChatPagination.Last(100),
         search = ZF_TOK
-      ) ?: continue
+      )
+      if (res == null) {
+        allRead = false
+        continue
+      }
       val chat = res.first
       val list = ArrayList<ZfEvent>()
       for (ci in chat.chatItems) {
@@ -547,22 +603,35 @@ private suspend fun zfRefresh() {
       withContext(Dispatchers.Main) { zfSetChat(chat.chatInfo.id, list) }
     }
     withContext(Dispatchers.Main) { zfInitSeen() }
+    complete = allRead
   } catch (e: Exception) {
     Log.e(TAG, "zetaria feed refresh: " + e.stackTraceToString())
   } finally {
     zfRefreshing.set(false)
     withContext(NonCancellable + Dispatchers.Main) { zfLoading.value = false }
   }
+  return complete
 }
 
 /** Espera a que no haya una lectura en curso y lee de nuevo (para tener el almacén completo). */
-private suspend fun zfRefreshNow() {
+private suspend fun zfRefreshNow(): Boolean {
   var n = 0
   while (zfRefreshing.get() && n < 40) {
     delay(250)
     n++
   }
-  zfRefresh()
+  return zfRefresh()
+}
+
+/** Lee el feed y, si la lectura fue completa, reenvía publicaciones anteriores a contactos que no las tienen. */
+private suspend fun zfRefreshAll() {
+  if (zfRefresh()) {
+    try {
+      zfReconcile()
+    } catch (e: Exception) {
+      Log.e(TAG, "zetaria feed reconcile: " + e.stackTraceToString())
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -670,19 +739,34 @@ private suspend fun zfComment(p: ZfPost, text: String, media: URI?, video: Boole
   return if (ok) null else "No se pudo enviar el comentario."
 }
 
-/** emoji = una reacción, o "-" para quitar la mía. */
-private suspend fun zfReact(p: ZfPost, emoji: String): Boolean {
+/** emoji = una reacción, o "-" para quitar la mía. target = id del comentario al que se reacciona (null = la publicación). */
+private suspend fun zfReact(p: ZfPost, emoji: String, target: String?): Boolean {
+  val metaLine = if (target != null) "\n" + ZF_META_REPLY + target else ""
   if (!p.mine) {
     val c = withContext(Dispatchers.Main) { zfChatById(p.chatId) } ?: return false
-    return zfSendOne(c, MsgContent.MCText(ZF_REACT + p.pid + " " + emoji), null)
+    return zfSendOne(c, MsgContent.MCText(ZF_REACT + p.pid + " " + emoji + metaLine), null)
   }
   val targets = withContext(Dispatchers.Main) { zfTargets() }
-  val msg = ZF_RREL + p.pid + " a " + emoji + " " + zfMyName()
+  val msg = ZF_RREL + p.pid + " a " + emoji + " " + zfMyName() + metaLine
   var ok = false
   for (c in targets) {
     if (zfSendOne(c, MsgContent.MCText(msg), null)) ok = true
   }
   return ok
+}
+
+/** Elimina una publicación mía: desaparece de mi feed y del de mis contactos. */
+private suspend fun zfDeletePost(p: ZfPost): Boolean {
+  if (!p.mine) return false
+  withContext(Dispatchers.Main) {
+    zfMarkDeletedLocal(p.pid)
+    zfBump()
+  }
+  val targets = withContext(Dispatchers.Main) { zfTargets() }
+  for (c in targets) {
+    zfSendOne(c, MsgContent.MCText(ZF_DEL + p.pid), null)
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------
@@ -764,6 +848,7 @@ private suspend fun zfRelayFromContact(rhId: Long?, cInfo: ChatInfo, ev: ZfEvent
     src = zfFileOf(ev.ci)
   } else {
     lines.add(ZF_RREL + ev.pid + " " + key + " " + ev.emoji + " " + name)
+    if (ev.reply.isNotEmpty()) lines.add(ZF_META_REPLY + ev.reply)
     if (avatar != null && ev.emoji != "-") lines.add(ZF_META_AVATAR + avatar)
   }
   val mc = zfMakeContent(if (src != null) ev.ci.content.msgContent else null, lines.joinToString("\n"))
@@ -788,9 +873,9 @@ fun zetariaFeedOnFileComplete(rhId: Long?, user: UserLike, cInfo: ChatInfo, ci: 
 
 private suspend fun zfHandleFileComplete(rhId: Long?, user: UserLike, cInfo: ChatInfo, ci: ChatItem) {
   val file = ci.file ?: return
-  if (ci.content.msgContent is MsgContent.MCImage && zfAutoSaveOn()) {
+  if (ci.content.msgContent is MsgContent.MCImage && !zetariaIsFeedItem(ci) && zfAutoSaveOn()) {
     val k = user.userId.toString() + ":" + file.fileId
-    if (zfAutoSaved.add(k)) zetariaSaveToGallery(file, false, true)
+    if (zfAutoSaved.add(k)) zetariaSaveToGallery(file, false, false, true)
   }
   val ev = zfEventOf(rhId, cInfo, ci) ?: return
   if (ev.sent || ev.kind != ZfKind.COMMENT) return
@@ -800,14 +885,33 @@ private suspend fun zfHandleFileComplete(rhId: Long?, user: UserLike, cInfo: Cha
 
 // ---------------------------------------------------------------------------
 // Contacto nuevo: se le reenvían mis publicaciones anteriores (con sus comentarios y reacciones),
-// como cuando te unes a un canal.
+// como cuando te unes a un canal. Se dispara al conectarse el contacto y, por si ese aviso falla,
+// también al leer el feed (se reenvía a cada contacto lo que le falta).
 // ---------------------------------------------------------------------------
+private val zfBackfilling: MutableSet<Long> = ConcurrentHashMap.newKeySet<Long>()
+
+private fun zfBfKey(userId: Long, contactId: Long): String = "zetaria_feed_bf2_" + userId + "_" + contactId
+
+private fun zfFlag(key: String): Boolean = try {
+  settings.getBoolean(key, false)
+} catch (e: Exception) {
+  false
+}
+
+private fun zfSetFlag(key: String) {
+  try {
+    settings.putBoolean(key, true)
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed flag: " + e.stackTraceToString())
+  }
+}
+
 fun zetariaFeedOnContactReady(rhId: Long?, user: UserLike, contact: Contact) {
   if (rhId != null || !contact.directOrUsed) return
   val contactId = contact.contactId
   withLongRunningApi {
     try {
-      zfBackfill(user, contactId)
+      zfBackfillContact(user, contactId, true, false)
     } catch (e: Exception) {
       Log.e(TAG, "zetaria feed backfill: " + e.stackTraceToString())
     }
@@ -819,55 +923,80 @@ private fun zfChatOfContact(contactId: Long): Chat? = zfTargets().firstOrNull { 
   ci is ChatInfo.Direct && ci.contact.contactId == contactId
 }
 
-private suspend fun zfBackfill(user: UserLike, contactId: Long) {
-  if (!zfIsActiveUser(user)) return
-  val flag = "zetaria_feed_bf_" + user.userId + "_" + contactId
-  val done = try {
-    settings.getBoolean(flag, false)
-  } catch (e: Exception) {
-    false
+/** ¿Ya le envié a ese chat esta publicación? Llamar desde el hilo principal con el almacén cargado. */
+private fun zfChatHasMyPost(chatId: String, pid: String): Boolean {
+  val m = zfEvents[chatId] ?: return false
+  for (e in m.values) {
+    if (e.kind == ZfKind.POST && e.sent && e.pid == pid) return true
   }
-  if (done) return
+  return false
+}
+
+/**
+ * Envía a un contacto las publicaciones mías que no tiene. wait = esperar a que el chat esté listo
+ * (aviso de conexión). refreshed = el almacén ya se acaba de leer completo.
+ */
+private suspend fun zfBackfillContact(user: UserLike, contactId: Long, wait: Boolean, refreshed: Boolean): Boolean {
+  if (!zfIsActiveUser(user)) return false
+  val flag = zfBfKey(user.userId, contactId)
+  if (zfFlag(flag)) return true
+  if (!zfBackfilling.add(contactId)) return false
   try {
-    settings.putBoolean(flag, true)
-  } catch (e: Exception) {
-    Log.e(TAG, "zetaria feed backfill flag: " + e.stackTraceToString())
-  }
-  var chat: Chat? = null
-  var tries = 0
-  while (chat == null && tries < 15) {
-    chat = withContext(Dispatchers.Main) { zfChatOfContact(contactId) }
-    if (chat == null) {
+    var found: Chat? = null
+    var tries = 0
+    while (found == null) {
+      found = withContext(Dispatchers.Main) { zfChatOfContact(contactId) }
+      if (found != null || !wait || tries >= 20) break
       delay(1000)
       tries++
     }
-  }
-  if (chat == null) {
-    // todavía no está lista: se intentará de nuevo con el siguiente aviso de conexión
-    try {
-      settings.putBoolean(flag, false)
-    } catch (e: Exception) {
-      Log.e(TAG, "zetaria feed backfill flag: " + e.stackTraceToString())
+    val chat = found ?: return false
+    if (!refreshed && !zfRefreshNow()) return false
+    val missing = withContext(Dispatchers.Main) {
+      zfBuildPosts()
+        .filter { it.mine && !zfChatHasMyPost(chat.id, it.pid) }
+        .sortedByDescending { it.tsMs }
+        .take(ZF_BACKFILL_POSTS)
+        .reversed()
     }
-    return
-  }
-  zfRefreshNow()
-  val posts = withContext(Dispatchers.Main) { zfBuildPosts() }
-    .filter { it.mine }
-    .sortedByDescending { it.tsMs }
-    .take(ZF_BACKFILL_POSTS)
-    .reversed()
-  for (p in posts) {
-    zfSendPostCopy(chat, p)
-    delay(150)
-    for (cm in p.comments.take(ZF_BACKFILL_ITEMS)) {
-      zfSendCommentCopy(chat, p, cm)
+    if (missing.isEmpty()) return true
+    var allOk = true
+    for (p in missing) {
+      if (!zfSendPostCopy(chat, p)) allOk = false
       delay(150)
+      for (cm in p.comments.take(ZF_BACKFILL_ITEMS)) {
+        zfSendCommentCopy(chat, p, cm)
+        delay(150)
+        for (rc in cm.reactors.take(ZF_BACKFILL_ITEMS)) {
+          zfSendReactionCopy(chat, p, rc, cm.cid)
+          delay(100)
+        }
+      }
+      for (rc in p.reactors.take(ZF_BACKFILL_ITEMS)) {
+        zfSendReactionCopy(chat, p, rc, null)
+        delay(100)
+      }
     }
-    for (rc in p.reactors.take(ZF_BACKFILL_ITEMS)) {
-      zfSendReactionCopy(chat, p, rc)
-      delay(100)
+    if (allOk) zfSetFlag(flag)
+    return allOk
+  } finally {
+    zfBackfilling.remove(contactId)
+  }
+}
+
+/** Revisa todos los contactos y reenvía lo que les falte. Solo llamar justo después de una lectura completa. */
+private suspend fun zfReconcile() {
+  val user = chatModel.currentUser.value ?: return
+  val ids = withContext(Dispatchers.Main) {
+    val res = ArrayList<Long>()
+    for (c in zfTargets()) {
+      val ci = c.chatInfo
+      if (ci is ChatInfo.Direct) res.add(ci.contact.contactId)
     }
+    res
+  }
+  for (id in ids) {
+    zfBackfillContact(user, id, false, true)
   }
 }
 
@@ -895,21 +1024,32 @@ private suspend fun zfSendCommentCopy(c: Chat, p: ZfPost, cm: ZfComment): Boolea
   return zfSendOne(c, mc, src)
 }
 
-private suspend fun zfSendReactionCopy(c: Chat, p: ZfPost, rc: ZfReactor): Boolean {
+private suspend fun zfSendReactionCopy(c: Chat, p: ZfPost, rc: ZfReactor, target: String?): Boolean {
   val own = rc.key == "a"
   val lines = ArrayList<String>()
   lines.add(ZF_RREL + p.pid + " " + rc.key + " " + rc.emoji + " " + (if (own) zfMyName() else zfClean(rc.name)))
+  if (target != null) lines.add(ZF_META_REPLY + target)
   val av = if (own) null else zfSmallAvatar(rc.avatar)
   if (av != null) lines.add(ZF_META_AVATAR + av)
   return zfSendOne(c, MsgContent.MCText(lines.joinToString("\n")), null)
 }
 
 // ---------------------------------------------------------------------------
-// Lista de chats: la fila de un contacto no muestra la publicación enviada; se muestra su último mensaje real.
-// (Dentro de la sesión los mensajes del feed ni siquiera entran al modelo; esto cubre lo que la base de datos
-// devuelve como «último mensaje» al reiniciar la app.)
+// Lista de chats: los mensajes del feed no deben mover ni cambiar la fila de un contacto.
+// La base de datos sí los cuenta como actividad, así que al recargar la lista el chat del contacto
+// llegaría arriba y con la publicación como «último mensaje». Aquí se ordena y se muestra según el
+// último mensaje real de la conversación.
 // ---------------------------------------------------------------------------
-private val zfPreviewCache = HashMap<String, ChatItem?>()
+private class ZfReal(val item: ChatItem?, val tsMs: Long)
+
+private val zfRealCache = ConcurrentHashMap<String, ZfReal>()
+
+/** Último mensaje de la fila si es del feed (solo chats directos), si no null. */
+private fun zfFeedLast(chat: Chat): ChatItem? {
+  if (chat.chatInfo !is ChatInfo.Direct) return null
+  val last = chat.chatItems.lastOrNull() ?: return null
+  return if (zetariaIsFeedItem(last)) last else null
+}
 
 private suspend fun zfLastRealItem(chat: Chat): ChatItem? {
   val res = chatModel.controller.apiGetChat(
@@ -917,36 +1057,95 @@ private suspend fun zfLastRealItem(chat: Chat): ChatItem? {
     type = ChatType.Direct,
     id = chat.chatInfo.apiId,
     scope = null,
-    pagination = ChatPagination.Last(40)
+    pagination = ChatPagination.Last(100)
   ) ?: return null
   return res.first.chatItems.lastOrNull { !zetariaIsFeedItem(it) }
 }
 
-@Composable
-fun zetariaPreviewChat(chat: Chat): Chat {
-  val last = chat.chatItems.lastOrNull()
-  if (last == null || chat.chatInfo !is ChatInfo.Direct || !zetariaIsFeedItem(last)) return chat
-  val key = chat.id + ":" + last.id
-  var repl by remember(key) { mutableStateOf(zfPreviewCache[key]) }
-  var done by remember(key) { mutableStateOf(zfPreviewCache.containsKey(key)) }
-  LaunchedEffect(key) {
-    if (!done) {
-      val found = withContext(Dispatchers.IO) {
-        try {
-          zfLastRealItem(chat)
-        } catch (e: Exception) {
-          null
-        }
-      }
-      withContext(Dispatchers.Main) {
-        zfPreviewCache[key] = found
-        repl = found
-        done = true
+/** Último mensaje real de un chat cuya fila muestra un mensaje del feed (se guarda en memoria). */
+private suspend fun zfEnsureReal(chat: Chat): ZfReal {
+  val fl = zfFeedLast(chat) ?: return ZfReal(chat.chatItems.lastOrNull(), chat.chatInfo.chatTs.toEpochMilliseconds())
+  val key = chat.id + ":" + fl.id
+  val cached = zfRealCache[key]
+  if (cached != null) return cached
+  val item = try {
+    zfLastRealItem(chat)
+  } catch (e: Exception) {
+    null
+  }
+  val r = ZfReal(item, (item?.meta?.itemTs ?: chat.chatInfo.chatTs).toEpochMilliseconds())
+  zfRealCache[key] = r
+  return r
+}
+
+private fun zfChatSortMs(chat: Chat): Long {
+  val fl = zfFeedLast(chat)
+  if (fl != null) {
+    val r = zfRealCache[chat.id + ":" + fl.id]
+    return r?.tsMs ?: chat.chatInfo.chatTs.toEpochMilliseconds()
+  }
+  return (chat.chatItems.lastOrNull()?.meta?.itemTs ?: chat.chatInfo.chatTs).toEpochMilliseconds()
+}
+
+private suspend fun zfResolveReal(chats: List<Chat>) {
+  var changed = false
+  for (c in chats) {
+    val fl = zfFeedLast(c) ?: continue
+    if (zfRealCache.containsKey(c.id + ":" + fl.id)) continue
+    zfEnsureReal(c)
+    changed = true
+  }
+  if (changed) {
+    withContext(Dispatchers.Main) {
+      val cur = chatModel.chatsContext.chats.value
+      chatModel.chatsContext.chats.replaceAll(cur.sortedByDescending { zfChatSortMs(it) })
+    }
+  }
+}
+
+/**
+ * Se aplica cada vez que la app carga la lista de chats desde la base de datos. Si ningún chat tiene
+ * un mensaje del feed como último, devuelve la lista tal cual.
+ */
+fun zetariaOrderChats(list: List<Chat>): List<Chat> {
+  var any = false
+  var pending: ArrayList<Chat>? = null
+  for (c in list) {
+    val fl = zfFeedLast(c) ?: continue
+    any = true
+    if (!zfRealCache.containsKey(c.id + ":" + fl.id)) {
+      val acc = pending ?: ArrayList()
+      acc.add(c)
+      pending = acc
+    }
+  }
+  if (!any) return list
+  val todo = pending
+  if (todo != null) {
+    withLongRunningApi {
+      try {
+        zfResolveReal(todo)
+      } catch (e: Exception) {
+        Log.e(TAG, "zetaria feed order: " + e.stackTraceToString())
       }
     }
   }
-  val r = repl
-  return chat.copy(chatItems = if (r != null) arrayListOf(r) else arrayListOf<ChatItem>())
+  return list.sortedByDescending { zfChatSortMs(it) }
+}
+
+@Composable
+fun zetariaPreviewChat(chat: Chat): Chat {
+  val fl = zfFeedLast(chat) ?: return chat
+  val key = chat.id + ":" + fl.id
+  var real by remember(key) { mutableStateOf<ZfReal?>(zfRealCache[key]) }
+  LaunchedEffect(key) {
+    if (real == null) {
+      val r = withContext(Dispatchers.IO) { zfEnsureReal(chat) }
+      real = r
+    }
+  }
+  val item = real?.item
+  return chat.copy(chatItems = if (item != null) arrayListOf(item) else arrayListOf<ChatItem>())
 }
 
 // ---------------------------------------------------------------------------
@@ -964,7 +1163,7 @@ fun ZetariaFeedTabs(chatsTitle: String) {
   // una sola lectura al arrancar, para saber si hay publicaciones nuevas aunque no abras el feed
   LaunchedEffect(ready) {
     if (ready && zfInitialDone.compareAndSet(false, true)) {
-      withContext(Dispatchers.IO) { zfRefresh() }
+      withContext(Dispatchers.IO) { zfRefreshAll() }
     }
   }
   Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -1004,16 +1203,12 @@ fun ZetariaFeedScreen() {
   val version = zfVersion.value
   val posts = remember(version) { zfBuildPosts() }
   val loading = zfLoading.value
-  val autoSave = zfAutoSave.value
   val secondary = MaterialTheme.colors.secondary
   val primary = MaterialTheme.colors.primary
   var showPublish by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
-  LaunchedEffect(Unit) {
-    zfAutoSaveOn()
-    withContext(Dispatchers.IO) { zfRefresh() }
-  }
+  LaunchedEffect(Unit) { withContext(Dispatchers.IO) { zfRefreshAll() } }
   // mientras el feed está abierto, todo lo que llega cuenta como visto
   LaunchedEffect(version) { zfSetSeen(zfNewestOthersMs()) }
 
@@ -1048,21 +1243,10 @@ fun ZetariaFeedScreen() {
           fontSize = 13.sp,
           color = primary,
           modifier = Modifier
-            .clickable(enabled = !loading) { scope.launch(Dispatchers.IO) { zfRefresh() } }
+            .clickable(enabled = !loading) { scope.launch(Dispatchers.IO) { zfRefreshAll() } }
             .padding(8.dp)
         )
       }
-    }
-    item(key = "autosave") {
-      Text(
-        "🖼 Guardar en la galería las fotos que recibes: " + (if (autoSave) "Sí" else "No"),
-        Modifier
-          .fillMaxWidth()
-          .clickable { zfSetAutoSave(!autoSave) }
-          .padding(horizontal = 16.dp, vertical = 6.dp),
-        fontSize = 12.sp,
-        color = secondary
-      )
     }
     if (posts.isEmpty() && !loading) {
       item(key = "empty") {
@@ -1086,6 +1270,25 @@ fun ZetariaFeedScreen() {
 // ---------------------------------------------------------------------------
 // Imágenes y videos
 // ---------------------------------------------------------------------------
+private fun zfClock(ms: Long): String {
+  val s = (if (ms < 0L) 0L else ms / 1000L).toInt()
+  return (s / 60).toString() + ":" + (s % 60).toString().padStart(2, '0')
+}
+
+@Composable
+private fun ZfRoundButton(label: String, size: Dp, fontSize: Int, onClick: () -> Unit) {
+  Box(
+    Modifier
+      .size(size)
+      .clip(CircleShape)
+      .background(Color.Black.copy(alpha = 0.5f))
+      .clickable { onClick() },
+    contentAlignment = Alignment.Center
+  ) {
+    Text(label, fontSize = fontSize.sp, fontWeight = FontWeight.Bold, color = Color.White)
+  }
+}
+
 @Composable
 private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, maxWidth: Dp) {
   var uri by remember(file.fileId) { mutableStateOf<URI?>(null) }
@@ -1127,6 +1330,8 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
   val progress = remember(u.path) { player.progress }
   val duration = remember(u.path) { player.duration }
   val pv by remember(u) { player.preview }
+  var controlsVisible by remember(u) { mutableStateOf(true) }
+  var dragValue by remember(u) { mutableStateOf<Float?>(null) }
   val play = {
     player.enableSound(true)
     player.play(true)
@@ -1135,32 +1340,79 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
     player.enableSound(false)
     player.stop()
   }
+  val toggle: () -> Unit = { if (playing.value) stop() else play() }
+  val skip: (Long) -> Unit = { delta ->
+    val total = if (duration.value > 0L) duration.value else durationMs
+    val target = (progress.value + delta).coerceIn(0L, if (total > 0L) total else Long.MAX_VALUE)
+    zetariaVideoSeek(player, target)
+  }
   DisposableEffect(u) {
     onDispose { stop() }
   }
+  // mientras se reproduce, los controles se esconden solos
+  LaunchedEffect(controlsVisible, playing.value, dragValue) {
+    if (controlsVisible && playing.value && dragValue == null) {
+      delay(3500)
+      controlsVisible = false
+    }
+  }
   val showPreview = !playing.value || progress.value == 0L
+  val showControls = !playing.value || controlsVisible
+  val total = if (duration.value > 0L) duration.value else durationMs
   Box(Modifier.width(width).clip(RoundedCornerShape(10.dp))) {
-    PlayerView(player, width, onClick = play, onLongClick = {}, stop = stop)
+    PlayerView(
+      player,
+      width,
+      onClick = {
+        play()
+        controlsVisible = true
+      },
+      onLongClick = {},
+      stop = { controlsVisible = !controlsVisible }
+    )
     if (showPreview) {
       Image(pv, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
-      Box(
-        Modifier
-          .align(Alignment.Center)
-          .size(56.dp)
-          .clip(CircleShape)
-          .background(Color.Black.copy(alpha = 0.4f))
-          .clickable { play() },
-        contentAlignment = Alignment.Center
-      ) {
-        Text("▶", fontSize = 26.sp, color = Color.White)
-      }
     }
-    val d = duration.value
-    if (d > 0L && !showPreview) {
-      LinearProgressIndicator(
-        progress = (progress.value.toFloat() / d.toFloat()).coerceIn(0f, 1f),
-        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-      )
+    if (showControls) {
+      Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
+      Row(
+        Modifier.align(Alignment.Center),
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        ZfRoundButton("↺10", 46.dp, 13) { skip(-10_000L) }
+        ZfRoundButton(if (playing.value) "⏸" else "▶", 60.dp, 26) {
+          toggle()
+          controlsVisible = true
+        }
+        ZfRoundButton("10↻", 46.dp, 13) { skip(10_000L) }
+      }
+      Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
+        Row(Modifier.fillMaxWidth()) {
+          Text(zfClock(progress.value), fontSize = 11.sp, color = Color.White)
+          Spacer(Modifier.weight(1f))
+          Text(zfClock(total), fontSize = 11.sp, color = Color.White)
+        }
+        val frac = dragValue ?: (if (total > 0L) (progress.value.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f)
+        Slider(
+          value = frac,
+          onValueChange = {
+            dragValue = it
+            controlsVisible = true
+          },
+          onValueChangeFinished = {
+            val dv = dragValue
+            if (dv != null) zetariaVideoSeek(player, (dv * total.toFloat()).toLong())
+            dragValue = null
+          },
+          modifier = Modifier.fillMaxWidth(),
+          colors = SliderDefaults.colors(
+            thumbColor = Color.White,
+            activeTrackColor = Color.White,
+            inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+          )
+        )
+      }
     }
   }
 }
@@ -1272,7 +1524,7 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
         fontSize = 13.sp,
         color = MaterialTheme.colors.primary,
         modifier = Modifier
-          .clickable { withLongRunningApi { zetariaSaveToGallery(lf, isVideo, false) } }
+          .clickable { withLongRunningApi { zetariaSaveToGallery(lf, isVideo, true, false) } }
           .padding(vertical = 8.dp)
       )
     }
@@ -1414,7 +1666,35 @@ private fun zfThread(comments: List<ZfComment>): List<Pair<ZfComment, Int>> {
 }
 
 @Composable
-private fun ZfCommentRow(c: ZfComment, depth: Int, parentName: String?, onReply: () -> Unit) {
+private fun ZfReactionBar(counts: Map<String, Int>, mine: String?, small: Boolean, enabled: Boolean, onPick: (String) -> Unit) {
+  val primary = MaterialTheme.colors.primary
+  val secondary = MaterialTheme.colors.secondary
+  val onBg = MaterialTheme.colors.onBackground
+  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(if (small) 4.dp else 6.dp)) {
+    for (em in ZF_EMOJIS) {
+      val n = counts[em] ?: 0
+      val sel = mine == em
+      Row(
+        Modifier
+          .clip(RoundedCornerShape(16.dp))
+          .border(1.dp, if (sel) primary else secondary.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+          .clickable(enabled = enabled) { onPick(em) }
+          .padding(horizontal = if (small) 7.dp else 10.dp, vertical = if (small) 3.dp else 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Text(em, fontSize = if (small) 13.sp else 16.sp)
+        if (n > 0) {
+          Spacer(Modifier.width(3.dp))
+          Text(n.toString(), fontSize = if (small) 11.sp else 13.sp, fontWeight = FontWeight.Bold, color = if (sel) primary else onBg)
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String?, onReply: () -> Unit) {
+  var reacting by remember(c.cid) { mutableStateOf(false) }
   val secondary = MaterialTheme.colors.secondary
   val onBg = MaterialTheme.colors.onBackground
   Row(Modifier.fillMaxWidth().padding(top = 10.dp, start = if (depth > 0) 30.dp else 0.dp)) {
@@ -1433,6 +1713,17 @@ private fun ZfCommentRow(c: ZfComment, depth: Int, parentName: String?, onReply:
         Text(c.text, fontSize = 14.sp, color = onBg)
       }
       ZfMedia(c.ci, c.rh, true)
+      Spacer(Modifier.height(4.dp))
+      ZfReactionBar(c.counts, c.myReaction, true, !reacting) { em ->
+        reacting = true
+        withLongRunningApi {
+          try {
+            zfReact(p, if (c.myReaction == em) "-" else em, c.cid)
+          } finally {
+            withContext(Dispatchers.Main) { reacting = false }
+          }
+        }
+      }
       Text(
         "Responder",
         fontSize = 12.sp,
@@ -1525,7 +1816,26 @@ private fun ZfReactorsDialog(p: ZfPost, onDismiss: () -> Unit) {
 }
 
 @Composable
+private fun ZfDeleteDialog(busy: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+  Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
+      Column(Modifier.padding(16.dp)) {
+        Text("Eliminar publicación", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text("Dejará de verse en tu Feed y en el de tus contactos.", fontSize = 14.sp, color = MaterialTheme.colors.secondary)
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+          TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancelar") }
+          TextButton(onClick = onConfirm, enabled = !busy) { Text("Eliminar", color = MaterialTheme.colors.error) }
+        }
+      }
+    }
+  }
+}
+
+@Composable
 private fun ZfPostCard(p: ZfPost) {
+  var showDelete by remember(p.key) { mutableStateOf(false) }
+  var deleting by remember(p.key) { mutableStateOf(false) }
   var showComments by remember(p.key) { mutableStateOf(false) }
   var showReactors by remember(p.key) { mutableStateOf(false) }
   var replyTo by remember(p.key) { mutableStateOf<ZfComment?>(null) }
@@ -1548,6 +1858,9 @@ private fun ZfPostCard(p: ZfPost) {
         Text(p.authorName, fontWeight = FontWeight.Bold, color = onBg, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(getTimestampText(p.ci.meta.itemTs), fontSize = 12.sp, color = secondary)
       }
+      if (p.mine) {
+        Text("🗑", fontSize = 18.sp, modifier = Modifier.clickable { showDelete = true }.padding(8.dp))
+      }
     }
     if (p.text.isNotEmpty()) {
       Spacer(Modifier.height(8.dp))
@@ -1555,32 +1868,13 @@ private fun ZfPostCard(p: ZfPost) {
     }
     ZfMedia(p.ci, p.rh, false)
     Spacer(Modifier.height(10.dp))
-    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-      for (em in ZF_EMOJIS) {
-        val n = p.counts[em] ?: 0
-        val mine = p.myReaction == em
-        Row(
-          Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .border(1.dp, if (mine) primary else secondary.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-            .clickable(enabled = !busy) {
-              busy = true
-              withLongRunningApi {
-                try {
-                  zfReact(p, if (mine) "-" else em)
-                } finally {
-                  withContext(Dispatchers.Main) { busy = false }
-                }
-              }
-            }
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          Text(em, fontSize = 16.sp)
-          if (n > 0) {
-            Spacer(Modifier.width(4.dp))
-            Text(n.toString(), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (mine) primary else onBg)
-          }
+    ZfReactionBar(p.counts, p.myReaction, false, !busy) { em ->
+      busy = true
+      withLongRunningApi {
+        try {
+          zfReact(p, if (p.myReaction == em) "-" else em, null)
+        } finally {
+          withContext(Dispatchers.Main) { busy = false }
         }
       }
     }
@@ -1603,13 +1897,32 @@ private fun ZfPostCard(p: ZfPost) {
       for (c in p.comments) names[c.cid] = c.name
       for (en in zfThread(p.comments)) {
         val c = en.first
-        ZfCommentRow(c, en.second, if (c.reply.isNotEmpty()) names[c.reply] else null) { replyTo = c }
+        ZfCommentRow(p, c, en.second, if (c.reply.isNotEmpty()) names[c.reply] else null) { replyTo = c }
       }
       ZfCommentComposer(p, replyTo) { replyTo = null }
     }
   }
   if (showReactors) {
     ZfReactorsDialog(p) { showReactors = false }
+  }
+  if (showDelete) {
+    ZfDeleteDialog(
+      busy = deleting,
+      onConfirm = {
+        deleting = true
+        withLongRunningApi {
+          try {
+            zfDeletePost(p)
+          } finally {
+            withContext(Dispatchers.Main) {
+              deleting = false
+              showDelete = false
+            }
+          }
+        }
+      },
+      onDismiss = { showDelete = false }
+    )
   }
 }
 
