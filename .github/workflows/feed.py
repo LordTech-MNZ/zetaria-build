@@ -2,7 +2,11 @@
 """Zetaria: Feed de publicaciones (pestaña «Feed» al lado de «Chats»).
 
 - Publicaciones con texto, imágenes y videos de la gente que tienes agregada, de más nueva a más antigua.
-- Imágenes y videos se pueden guardar en la galería, en la carpeta «Zetaria».
+- Imágenes y videos se pueden guardar en la galería, en la carpeta «Zetaria»; las fotos que recibes en cualquier chat
+  se guardan solas ahí (se puede apagar desde el Feed).
+- Reproductor de video propio dentro del Feed.
+- Comentarios con foto de perfil, respuestas a comentarios, e imágenes o videos adjuntos; se ve quién reaccionó.
+- A un contacto nuevo se le reenvían tus publicaciones anteriores (con sus comentarios y reacciones).
 - Aviso (globito con número) en la pestaña «Feed» cuando hay publicaciones nuevas.
 - Reacciones (👍 ❤️ 😂 😮 😢 🙏) y comentarios, visibles para todos los que recibieron la publicación
   (el autor reenvía lo que recibe al resto de sus contactos).
@@ -140,7 +144,21 @@ once(p,
      "          zetariaFeedOnNewItem(rhId, r.user, cInfo, cItem)\n"
      "          ntfManager.notifyMessageReceived(rhId, r.user, cInfo, cItem)\n",
      "llegada de mensajes nuevos")
+once(p,
+     "      is CR.ContactConnected -> {\n        if (active(r.user) && r.contact.directOrUsed) {\n",
+     "      is CR.ContactConnected -> {\n        zetariaFeedOnContactReady(rhId, r.user, r.contact)\n        if (active(r.user) && r.contact.directOrUsed) {\n",
+     "contacto conectado")
+once(p,
+     "      is CR.ContactSndReady -> {\n        if (active(r.user) && r.contact.directOrUsed) {\n",
+     "      is CR.ContactSndReady -> {\n        zetariaFeedOnContactReady(rhId, r.user, r.contact)\n        if (active(r.user) && r.contact.directOrUsed) {\n",
+     "contacto listo para enviar")
+once(p,
+     "      is CR.RcvFileComplete ->\n        chatItemSimpleUpdate(rhId, r.user, r.chatItem)\n",
+     "      is CR.RcvFileComplete -> {\n        zetariaFeedOnFileComplete(rhId, r.user, r.chatItem.chatInfo, r.chatItem.chatItem)\n        chatItemSimpleUpdate(rhId, r.user, r.chatItem)\n      }\n",
+     "archivo recibido completo")
 add_import(p, IMP_FN + "zetariaFeedOnNewItem")
+add_import(p, IMP_FN + "zetariaFeedOnContactReady")
+add_import(p, IMP_FN + "zetariaFeedOnFileComplete")
 
 # 6) Archivos nuevos (común, Android y, si existe, escritorio)
 d = f"{K}/views/chat/item"
