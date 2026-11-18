@@ -2,9 +2,11 @@
 """Zetaria: Feed de publicaciones (pestaña «Feed» al lado de «Chats»).
 
 - Publicaciones con texto, imágenes y videos de la gente que tienes agregada, de más nueva a más antigua.
-- Imágenes y videos se pueden guardar en la galería, en la carpeta «Zetaria»; las fotos que recibes en cualquier chat
-  se guardan solas ahí (se puede apagar desde el Feed).
-- Reproductor de video propio dentro del Feed.
+- Imágenes y videos del Feed se pueden guardar en la galería (Movies/Zetaria Feed); las fotos que recibes en cualquier
+  chat se guardan solas en Pictures/Zetaria Chat Images, sin duplicarse.
+- Reproductor de video propio dentro del Feed, con ±10 s y barra para moverse.
+- Las publicaciones propias se pueden eliminar; también se puede reaccionar a los comentarios.
+- La lista de chats se ordena por el último mensaje real, no por la actividad del feed.
 - Comentarios con foto de perfil, respuestas a comentarios, e imágenes o videos adjuntos; se ve quién reaccionó.
 - A un contacto nuevo se le reenvían tus publicaciones anteriores (con sus comentarios y reacciones).
 - Aviso (globito con número) en la pestaña «Feed» cuando hay publicaciones nuevas.
@@ -110,7 +112,13 @@ once(p,
      "    suspend fun upsertChatItem(rhId: Long?, cInfo: ChatInfo, cItem: ChatItem): Boolean {\n"
      "      if (cInfo is ChatInfo.Direct && zetariaIsFeedItem(cItem)) return false\n",
      "upsertChatItem")
+once(p,
+     "    fun updateChats(newChats: List<Chat>, keepingChatId: String? = null) {\n",
+     "    fun updateChats(newChats: List<Chat>, keepingChatId: String? = null) {\n"
+     "      val newChats = zetariaOrderChats(newChats)\n",
+     "updateChats")
 add_import(p, IMP_FN + "zetariaIsFeedItem")
+add_import(p, IMP_FN + "zetariaOrderChats")
 
 # 3) Dentro del chat los mensajes del feed no se dibujan
 p = load(f"{K}/views/chat/ChatView.kt")
