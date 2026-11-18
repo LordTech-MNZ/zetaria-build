@@ -29,11 +29,11 @@ private fun zfVideoMimeType(fileName: String): String = when (fileName.substring
  * En Android 10 o superior no hace falta ningún permiso. En versiones anteriores el archivo
  * queda en la carpeta por defecto de la galería.
  */
-actual suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean) {
+actual suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean, quiet: Boolean) {
   val filePath = getLoadedFilePath(file)
   val name = file?.fileName
   if (file == null || filePath == null || name == null) {
-    withContext(Dispatchers.Main) { showToast("Archivo no encontrado") }
+    if (!quiet) withContext(Dispatchers.Main) { showToast("Archivo no encontrado") }
     return
   }
   var saved = false
@@ -86,7 +86,9 @@ actual suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean) {
   } catch (e: Exception) {
     Log.e(TAG, "zetaria feed save to gallery: " + e.stackTraceToString())
   }
-  withContext(Dispatchers.Main) {
-    showToast(if (saved) "Guardado en la galería (carpeta Zetaria)" else "No se pudo guardar")
+  if (!quiet) {
+    withContext(Dispatchers.Main) {
+      showToast(if (saved) "Guardado en la galería (carpeta Zetaria)" else "No se pudo guardar")
+    }
   }
 }

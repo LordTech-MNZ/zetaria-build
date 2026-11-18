@@ -11,11 +11,11 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /** Escritorio: copia el archivo a ~/Pictures/Zetaria o ~/Videos/Zetaria. */
-actual suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean) {
+actual suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean, quiet: Boolean) {
   val filePath = getLoadedFilePath(file)
   val name = file?.fileName
   if (file == null || filePath == null || name == null) {
-    showToast("Archivo no encontrado")
+    if (!quiet) showToast("Archivo no encontrado")
     return
   }
   var saved = false
@@ -36,5 +36,5 @@ actual suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean) {
   } catch (e: Exception) {
     Log.e(TAG, "zetaria feed save: " + e.stackTraceToString())
   }
-  showToast(if (saved) "Guardado en la carpeta Zetaria" else "No se pudo guardar")
+  if (!quiet) showToast(if (saved) "Guardado en la carpeta Zetaria" else "No se pudo guardar")
 }
