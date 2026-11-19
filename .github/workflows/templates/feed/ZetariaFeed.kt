@@ -587,8 +587,29 @@ private fun zfBuildPosts(): List<ZfPost> {
 // ---------------------------------------------------------------------------
 // Lectura: se vuelven a cargar los mensajes del feed de cada contacto
 // ---------------------------------------------------------------------------
+/**
+ * Lee mensajes de un chat directo sin avisos de error y solo si el chat está en marcha
+ * (al iniciar o detener la app el núcleo no responde y apiGetChat mostraba «Fallo en la carga del chat»).
+ */
+private suspend fun zfGetChatQuiet(rh: Long?, id: Long, pagination: ChatPagination, search: String): Pair<Chat, NavigationInfo>? {
+  if (chatModel.chatRunning.value != true) return null
+  return try {
+    val r = chatModel.controller.sendCmd(rh, CC.ApiGetChat(ChatType.Direct, id, null, null, pagination, search), log = false)
+    if (r is API.Result && r.res is CR.ApiChat) {
+      if (rh == null) r.res.chat to r.res.navInfo else r.res.chat.copy(remoteHostId = rh) to r.res.navInfo
+    } else {
+      Log.e(TAG, "zetaria feed get chat: " + r.responseType)
+      null
+    }
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed get chat: " + e.stackTraceToString())
+    null
+  }
+}
+
 /** Devuelve true si se leyeron todos los chats sin errores. */
 private suspend fun zfRefresh(): Boolean {
+  if (chatModel.chatRunning.value != true) return false
   if (!zfRefreshing.compareAndSet(false, true)) return false
   withContext(Dispatchers.Main) { zfLoading.value = true }
   var complete = false
@@ -596,14 +617,7 @@ private suspend fun zfRefresh(): Boolean {
     var allRead = true
     val chats = withContext(Dispatchers.Main) { zfReadable() }
     for (c in chats) {
-      val res = chatModel.controller.apiGetChat(
-        rh = c.remoteHostId,
-        type = ChatType.Direct,
-        id = c.chatInfo.apiId,
-        scope = null,
-        pagination = ChatPagination.Last(100),
-        search = ZF_TOK
-      )
+      val res = zfGetChatQuiet(c.remoteHostId, c.chatInfo.apiId, ChatPagination.Last(100), ZF_TOK)
       if (res == null) {
         allRead = false
         continue
@@ -829,14 +843,7 @@ private suspend fun zfHandleIncoming(rhId: Long?, user: UserLike, cInfo: ChatInf
 
 /** Reenvía al resto de mis contactos un comentario o reacción que me llegó, si la publicación es mía. */
 private suspend fun zfRelayFromContact(rhId: Long?, cInfo: ChatInfo, ev: ZfEvent) {
-  val r = chatModel.controller.apiGetChat(
-    rh = rhId,
-    type = ChatType.Direct,
-    id = cInfo.apiId,
-    scope = null,
-    pagination = ChatPagination.Last(300),
-    search = ev.pid
-  ) ?: return
+  val r = zfGetChatQuiet(rhId, cInfo.apiId, ChatPagination.Last(300), ev.pid) ?: return
   var mineHere = false
   for (x in r.first.chatItems) {
     if (!x.chatDir.sent) continue
@@ -1054,9 +1061,10 @@ private suspend fun zfSendReactionCopy(c: Chat, p: ZfPost, rc: ZfReactor, target
 // llegaría arriba y con la publicación como «último mensaje». Aquí se ordena y se muestra según el
 // último mensaje real de la conversación.
 // ---------------------------------------------------------------------------
-private class ZfReal(val item: ChatItem?, val tsMs: Long)
+private class ZfReal(val item: ChatItem?, val tsMs: Long, val resolved: Boolean)
 
 private val zfRealCache = ConcurrentHashMap<String, ZfReal>()
+private val zfResolving: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
 
 /** Último mensaje de la fila si es del feed (solo chats directos), si no null. */
 private fun zfFeedLast(chat: Chat): ChatItem? {
@@ -1065,29 +1073,29 @@ private fun zfFeedLast(chat: Chat): ChatItem? {
   return if (zetariaIsFeedItem(last)) last else null
 }
 
+/** Último mensaje real del chat. Lanza una excepción si no se pudo leer (para no guardar un resultado falso). */
 private suspend fun zfLastRealItem(chat: Chat): ChatItem? {
-  val res = chatModel.controller.apiGetChat(
-    rh = chat.remoteHostId,
-    type = ChatType.Direct,
-    id = chat.chatInfo.apiId,
-    scope = null,
-    pagination = ChatPagination.Last(100)
-  ) ?: return null
+  val res = zfGetChatQuiet(chat.remoteHostId, chat.chatInfo.apiId, ChatPagination.Last(100), "")
+    ?: throw IllegalStateException("chat not readable")
   return res.first.chatItems.lastOrNull { !zetariaIsFeedItem(it) }
 }
 
-/** Último mensaje real de un chat cuya fila muestra un mensaje del feed (se guarda en memoria). */
+/**
+ * Último mensaje real de un chat cuya fila muestra un mensaje del feed. Solo se guarda en memoria
+ * cuando la lectura salió bien; si falló devuelve resolved = false y se vuelve a intentar después.
+ */
 private suspend fun zfEnsureReal(chat: Chat): ZfReal {
-  val fl = zfFeedLast(chat) ?: return ZfReal(chat.chatItems.lastOrNull(), chat.chatInfo.chatTs.toEpochMilliseconds())
+  val fl = zfFeedLast(chat)
+    ?: return ZfReal(chat.chatItems.lastOrNull(), chat.chatInfo.chatTs.toEpochMilliseconds(), true)
   val key = chat.id + ":" + fl.id
   val cached = zfRealCache[key]
   if (cached != null) return cached
-  val item = try {
+  val item: ChatItem? = try {
     zfLastRealItem(chat)
   } catch (e: Exception) {
-    null
+    return ZfReal(null, chat.chatInfo.chatTs.toEpochMilliseconds(), false)
   }
-  val r = ZfReal(item, (item?.meta?.itemTs ?: chat.chatInfo.chatTs).toEpochMilliseconds())
+  val r = ZfReal(item, (item?.meta?.itemTs ?: chat.chatInfo.chatTs).toEpochMilliseconds(), true)
   zfRealCache[key] = r
   return r
 }
@@ -1101,19 +1109,34 @@ private fun zfChatSortMs(chat: Chat): Long {
   return (chat.chatItems.lastOrNull()?.meta?.itemTs ?: chat.chatInfo.chatTs).toEpochMilliseconds()
 }
 
+/** Espera a que el chat esté en marcha, lee el último mensaje real de cada fila y reordena la lista. */
 private suspend fun zfResolveReal(chats: List<Chat>) {
-  var changed = false
-  for (c in chats) {
-    val fl = zfFeedLast(c) ?: continue
-    if (zfRealCache.containsKey(c.id + ":" + fl.id)) continue
-    zfEnsureReal(c)
-    changed = true
+  var waited = 0
+  while (chatModel.chatRunning.value != true && waited < 240) {
+    delay(500)
+    waited++
   }
-  if (changed) {
-    withContext(Dispatchers.Main) {
-      val cur = chatModel.chatsContext.chats.value
-      chatModel.chatsContext.chats.replaceAll(cur.sortedByDescending { zfChatSortMs(it) })
+  if (chatModel.chatRunning.value != true) return
+  var pending = chats
+  var round = 0
+  while (pending.isNotEmpty() && round < 6) {
+    val next = ArrayList<Chat>()
+    var changed = false
+    for (c in pending) {
+      val fl = zfFeedLast(c) ?: continue
+      if (zfRealCache.containsKey(c.id + ":" + fl.id)) continue
+      val r = zfEnsureReal(c)
+      if (r.resolved) changed = true else next.add(c)
     }
+    if (changed) {
+      withContext(Dispatchers.Main) {
+        val cur = chatModel.chatsContext.chats.value
+        chatModel.chatsContext.chats.replaceAll(cur.sortedByDescending { zfChatSortMs(it) })
+      }
+    }
+    pending = next
+    if (pending.isNotEmpty()) delay(2000)
+    round++
   }
 }
 
@@ -1123,24 +1146,25 @@ private suspend fun zfResolveReal(chats: List<Chat>) {
  */
 fun zetariaOrderChats(list: List<Chat>): List<Chat> {
   var any = false
-  var pending: ArrayList<Chat>? = null
+  val pending = ArrayList<Chat>()
   for (c in list) {
     val fl = zfFeedLast(c) ?: continue
     any = true
-    if (!zfRealCache.containsKey(c.id + ":" + fl.id)) {
-      val acc = pending ?: ArrayList()
-      acc.add(c)
-      pending = acc
-    }
+    val key = c.id + ":" + fl.id
+    if (!zfRealCache.containsKey(key) && zfResolving.add(key)) pending.add(c)
   }
   if (!any) return list
-  val todo = pending
-  if (todo != null) {
+  if (pending.isNotEmpty()) {
     withLongRunningApi {
       try {
-        zfResolveReal(todo)
+        zfResolveReal(pending)
       } catch (e: Exception) {
         Log.e(TAG, "zetaria feed order: " + e.stackTraceToString())
+      } finally {
+        for (c in pending) {
+          val fl = zfFeedLast(c)
+          if (fl != null) zfResolving.remove(c.id + ":" + fl.id)
+        }
       }
     }
   }
@@ -1152,10 +1176,19 @@ fun zetariaPreviewChat(chat: Chat): Chat {
   val fl = zfFeedLast(chat) ?: return chat
   val key = chat.id + ":" + fl.id
   var real by remember(key) { mutableStateOf<ZfReal?>(zfRealCache[key]) }
-  LaunchedEffect(key) {
-    if (real == null) {
-      val r = withContext(Dispatchers.IO) { zfEnsureReal(chat) }
-      real = r
+  val running = chatModel.chatRunning.value == true
+  LaunchedEffect(key, running) {
+    if (running) {
+      var tries = 0
+      while (real?.resolved != true && tries < 20) {
+        val r = withContext(Dispatchers.IO) { zfEnsureReal(chat) }
+        if (r.resolved) {
+          real = r
+          break
+        }
+        delay(3000)
+        tries++
+      }
     }
   }
   val item = real?.item
@@ -1172,7 +1205,7 @@ fun ZetariaFeedTabs(chatsTitle: String) {
   val open = zetariaFeedOpen.value
   val onBg = MaterialTheme.colors.onBackground
   val secondary = MaterialTheme.colors.secondary
-  val ready = chatModel.chats.value.isNotEmpty()
+  val ready = chatModel.chats.value.isNotEmpty() && chatModel.chatRunning.value == true
   val unseen = remember(zfVersion.value, zfSeen.value) { zfUnseenCount() }
   // una sola lectura al arrancar, para saber si hay publicaciones nuevas aunque no abras el feed
   LaunchedEffect(ready) {
