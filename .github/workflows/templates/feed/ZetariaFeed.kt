@@ -86,6 +86,20 @@ private val ZF_EMOJIS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 /** Guarda una imagen o un video recibido en la galería, dentro de la carpeta «Zetaria». */
 expect suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean, feed: Boolean, quiet: Boolean)
 
+/** Borra de «Pictures» las copias que esta app guardó antes y que ya están en «Pictures/Zetaria Chat Images». */
+expect suspend fun zetariaCleanGalleryDuplicates()
+
+/** El botón «Guardar» de un chat: usa la misma carpeta que el guardado automático (sin copia en Pictures). */
+fun zetariaSaveChatImageManual(ciFile: CIFile?) {
+  withLongRunningApi {
+    try {
+      zetariaSaveToGallery(ciFile, false, false, false)
+    } catch (e: Exception) {
+      Log.e(TAG, "zetaria feed manual save: " + e.stackTraceToString())
+    }
+  }
+}
+
 /** Mueve la reproducción de un video a una posición (milisegundos). */
 expect fun zetariaVideoSeek(player: VideoPlayer, positionMs: Long)
 
@@ -1163,7 +1177,14 @@ fun ZetariaFeedTabs(chatsTitle: String) {
   // una sola lectura al arrancar, para saber si hay publicaciones nuevas aunque no abras el feed
   LaunchedEffect(ready) {
     if (ready && zfInitialDone.compareAndSet(false, true)) {
-      withContext(Dispatchers.IO) { zfRefreshAll() }
+      withContext(Dispatchers.IO) {
+        try {
+          zetariaCleanGalleryDuplicates()
+        } catch (e: Exception) {
+          Log.e(TAG, "zetaria feed clean duplicates: " + e.stackTraceToString())
+        }
+        zfRefreshAll()
+      }
     }
   }
   Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {

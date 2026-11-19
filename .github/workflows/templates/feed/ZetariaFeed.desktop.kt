@@ -51,3 +51,6 @@ actual suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean, feed: Boo
 actual fun zetariaVideoSeek(player: VideoPlayer, positionMs: Long) {
   player.progress.value = positionMs
 }
+
+/** Escritorio: no hay nada que limpiar. */
+actual suspend fun zetariaCleanGalleryDuplicates() {}

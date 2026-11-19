@@ -1,5 +1,6 @@
 package chat.simplex.common.views.chat.item
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.os.Build
 import android.provider.MediaStore
@@ -134,4 +135,50 @@ actual fun zetariaVideoSeek(player: VideoPlayer, positionMs: Long) {
     Log.e(TAG, "zetaria feed seek: " + e.stackTraceToString())
   }
   player.progress.value = p
+}
+
+/**
+ * Versiones anteriores (y el botón «Guardar» original) dejaban copias en «Pictures» a secas.
+ * Aquí se borran, solo las que guardó esta app y solo si ya hay una igual (mismo nombre y tamaño)
+ * en «Pictures/Zetaria Chat Images»: no se pierde ninguna foto.
+ */
+actual suspend fun zetariaCleanGalleryDuplicates() {
+  if (Build.VERSION.SDK_INT < 29) return
+  try {
+    withContext(Dispatchers.IO) {
+      val resolver = androidAppContext.contentResolver
+      val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+      val cursor = resolver.query(
+        collection,
+        arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE),
+        MediaStore.MediaColumns.RELATIVE_PATH + "=? AND " + MediaStore.MediaColumns.OWNER_PACKAGE_NAME + "=?",
+        arrayOf("Pictures/", androidAppContext.packageName),
+        null
+      )
+      val rows = ArrayList<Triple<Long, String, Long>>()
+      if (cursor != null) {
+        cursor.use { c ->
+          while (c.moveToNext()) {
+            rows.add(Triple(c.getLong(0), c.getString(1) ?: "", c.getLong(2)))
+          }
+        }
+      }
+      for (r in rows) {
+        try {
+          val same = resolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns._ID),
+            MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.SIZE + "=? AND " + MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?",
+            arrayOf(r.second, r.third.toString(), ZF_DIR_CHAT_IMAGES + "%"),
+            null
+          )?.use { it.moveToFirst() } ?: false
+          if (same) resolver.delete(ContentUris.withAppendedId(collection, r.first), null, null)
+        } catch (e: Exception) {
+          Log.e(TAG, "zetaria feed clean one: " + e.stackTraceToString())
+        }
+      }
+    }
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed clean: " + e.stackTraceToString())
+  }
 }
