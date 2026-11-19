@@ -25,6 +25,7 @@ here = pathlib.Path(__file__).resolve().parent
 tpl = here / "templates" / "feed"
 K = "kotlin/chat/simplex/common"
 base = mp / "common/src/commonMain"
+abase = mp / "common/src/androidMain"
 
 
 def die(msg):
@@ -34,8 +35,8 @@ def die(msg):
 orig, edits = {}, {}
 
 
-def load(rel):
-    p = base / rel
+def load(rel, root=None):
+    p = (root or base) / rel
     if not p.exists():
         die(f"no existe {p}")
     if p not in orig:
@@ -119,6 +120,15 @@ once(p,
      "updateChats")
 add_import(p, IMP_FN + "zetariaIsFeedItem")
 add_import(p, IMP_FN + "zetariaOrderChats")
+
+# 2c) El botón «Guardar» de un chat guarda en la misma carpeta que el guardado automático (no en «Pictures» a secas)
+p = load(f"{K}/platform/Share.android.kt", abase)
+once(p,
+     "fun saveImage(ciFile: CIFile?) {\n  val filePath = getLoadedFilePath(ciFile)\n",
+     "fun saveImage(ciFile: CIFile?) {\n  zetariaSaveChatImageManual(ciFile)\n}\n\n"
+     "@Suppress(\"unused\")\nprivate fun saveImageOriginal(ciFile: CIFile?) {\n  val filePath = getLoadedFilePath(ciFile)\n",
+     "saveImage original")
+add_import(p, IMP_FN + "zetariaSaveChatImageManual")
 
 # 3) Dentro del chat los mensajes del feed no se dibujan
 p = load(f"{K}/views/chat/ChatView.kt")
