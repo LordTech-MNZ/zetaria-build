@@ -5,7 +5,9 @@
 - Imágenes y videos del Feed se pueden guardar en la galería (Movies/Zetaria Feed); las fotos que recibes en cualquier
   chat se guardan solas en Pictures/Zetaria Chat Images, sin duplicarse.
 - Reproductor de video propio dentro del Feed, con ±10 s y barra para moverse.
-- Las publicaciones propias se pueden eliminar; también se puede reaccionar a los comentarios.
+- Las publicaciones y los comentarios propios se pueden eliminar; se puede reaccionar a los comentarios.
+- Encuestas en las publicaciones y audios (MP3) con reproductor propio.
+- Reacciones estilo Facebook: botones «Reaccionar» (con la bandeja de emojis) y «Comentar».
 - La lista de chats se ordena por el último mensaje real, no por la actividad del feed.
 - Comentarios con foto de perfil, respuestas a comentarios, e imágenes o videos adjuntos; se ve quién reaccionó.
 - A un contacto nuevo se le reenvían tus publicaciones anteriores (con sus comentarios y reacciones).
