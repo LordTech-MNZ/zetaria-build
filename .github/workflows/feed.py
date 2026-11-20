@@ -15,7 +15,10 @@
 - Editar publicaciones y comentarios propios (lápiz): texto y también imagen, video o audio (cambiar o quitar;
   las encuestas no se editan). Se ve «editado» y se puede abrir el original.
 - Compartir una publicación (📤): en tu propio Feed o hacia otra app del teléfono, con su imagen, video o audio.
-- Descarga de videos y audios en el Feed con indicador, reintento y reproducción automática al terminar.
+- Descarga de videos y audios en el Feed con indicador, reintento y reproducción automática al terminar; opción
+  de descarga automática (apagada / audios / audios y videos pequeños, máx. 2 a la vez).
+- Botón para guardar audios (Música/Zetaria Feed) y publicación de archivos de cualquier formato (hasta 50 MB),
+  que los demás pueden descargar, abrir y guardar (Descargas/Zetaria Feed).
 - Aviso (globito con número) en la pestaña «Feed» cuando hay publicaciones nuevas.
 - Reacciones (👍 ❤️ 😂 😮 😢 😡, y «＋» para cualquier otro emoji) y comentarios, visibles para todos los que recibieron la publicación
   (el autor reenvía lo que recibe al resto de sus contactos).
