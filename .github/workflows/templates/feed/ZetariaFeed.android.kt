@@ -4,6 +4,8 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.os.Environment
 import android.webkit.MimeTypeMap
 import android.os.Build
 import android.provider.MediaStore
@@ -31,6 +33,8 @@ import java.io.File
 private const val ZF_DIR_CHAT_IMAGES = "Pictures/Zetaria Chat Images"
 private const val ZF_DIR_FEED_VIDEOS = "Movies/Zetaria Feed"
 private const val ZF_DIR_FEED_IMAGES_FALLBACK = "Pictures/Zetaria Feed"
+private const val ZF_DIR_FEED_AUDIO = "Music/Zetaria Feed"
+private const val ZF_DIR_FEED_FILES = "Download/Zetaria Feed"
 
 private fun zfVideoMimeType(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {
   "mov" -> "video/quicktime"
@@ -45,9 +49,9 @@ private fun zfVideoMimeType(fileName: String): String = when (fileName.substring
  * Si ya hay un archivo igual en esa carpeta (mismo nombre y tamaño) no lo vuelve a guardar.
  * Puede lanzar IllegalArgumentException si Android no admite ese tipo de archivo en esa carpeta.
  */
-private fun zfInsertAndCopy(file: CIFile, filePath: String, name: String, mime: String, video: Boolean, relativeDir: String): Boolean {
+private fun zfInsertAndCopy(file: CIFile, filePath: String, name: String, mime: String, video: Boolean, relativeDir: String, collectionOverride: Uri? = null): Boolean {
   val resolver = androidAppContext.contentResolver
-  val collection = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+  val collection = collectionOverride ?: (if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
   if (Build.VERSION.SDK_INT >= 29) {
     val cursor = resolver.query(
       collection,
@@ -251,6 +255,61 @@ actual suspend fun zetariaAudioDuration(file: CryptoFile): Int? = withContext(Di
     try {
       mmr.release()
     } catch (e: Exception) {
+    }
+  }
+}
+
+/**
+ * Guarda un audio en Música/Zetaria Feed o cualquier otro archivo en Descargas/Zetaria Feed, con su nombre original
+ * (sin repetirlo si ya está guardado). En Android 9 o anterior se copia directo a esas carpetas.
+ */
+actual suspend fun zetariaSaveFile(file: CIFile?, kind: Int, quiet: Boolean) {
+  val filePath = getLoadedFilePath(file)
+  val name = file?.fileName
+  if (file == null || filePath == null || name == null) {
+    if (!quiet) withContext(Dispatchers.Main) { showToast("Archivo no encontrado") }
+    return
+  }
+  var saved = false
+  try {
+    withContext(Dispatchers.IO) {
+      val ext = name.substringAfterLast('.', "").lowercase()
+      val ext2mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+      if (Build.VERSION.SDK_INT >= 29) {
+        if (kind == 3) {
+          val audioMime = if (ext2mime != null && ext2mime.startsWith("audio/")) ext2mime else "audio/mpeg"
+          saved = try {
+            zfInsertAndCopy(file, filePath, name, audioMime, false, ZF_DIR_FEED_AUDIO, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI)
+          } catch (e: IllegalArgumentException) {
+            zfInsertAndCopy(file, filePath, name, ext2mime ?: "application/octet-stream", false, ZF_DIR_FEED_FILES, MediaStore.Downloads.EXTERNAL_CONTENT_URI)
+          }
+        } else {
+          saved = zfInsertAndCopy(file, filePath, name, ext2mime ?: "application/octet-stream", false, ZF_DIR_FEED_FILES, MediaStore.Downloads.EXTERNAL_CONTENT_URI)
+        }
+      } else {
+        val base = Environment.getExternalStoragePublicDirectory(if (kind == 3) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_DOWNLOADS)
+        val dir = File(base, "Zetaria Feed")
+        dir.mkdirs()
+        val dest = File(dir, name)
+        if (dest.exists() && dest.length() > 0L) {
+          saved = true
+        } else {
+          val args = file.fileSource?.cryptoArgs
+          if (args != null) {
+            decryptCryptoFile(filePath, args, dest.absolutePath)
+          } else {
+            File(filePath).copyTo(dest)
+          }
+          saved = true
+        }
+      }
+    }
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed save file: " + e.stackTraceToString())
+  }
+  if (!quiet) {
+    withContext(Dispatchers.Main) {
+      showToast(if (saved) (if (kind == 3) "Guardado en Música/Zetaria Feed" else "Guardado en Descargas/Zetaria Feed") else "No se pudo guardar")
     }
   }
 }

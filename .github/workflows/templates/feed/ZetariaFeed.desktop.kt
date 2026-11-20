@@ -72,3 +72,37 @@ actual suspend fun zetariaAudioDuration(file: CryptoFile): Int? = withContext(Di
     null
   }
 }
+
+/** Escritorio: audios en Music/Zetaria Feed y otros archivos en Downloads/Zetaria Feed. */
+actual suspend fun zetariaSaveFile(file: CIFile?, kind: Int, quiet: Boolean) {
+  val filePath = getLoadedFilePath(file)
+  val name = file?.fileName
+  if (file == null || filePath == null || name == null) {
+    if (!quiet) showToast("Archivo no encontrado")
+    return
+  }
+  var saved = false
+  try {
+    withContext(Dispatchers.IO) {
+      val home = System.getProperty("user.home")
+      val dir = File(File(home, if (kind == 3) "Music" else "Downloads"), "Zetaria Feed")
+      dir.mkdirs()
+      val dest = File(dir, name)
+      if (dest.exists() && dest.length() == file.fileSize) {
+        saved = true
+      } else {
+        val target = if (dest.exists()) File(dir, System.currentTimeMillis().toString() + "_" + name) else dest
+        val args = file.fileSource?.cryptoArgs
+        if (args != null) {
+          decryptCryptoFile(filePath, args, target.absolutePath)
+        } else {
+          File(filePath).copyTo(target)
+        }
+        saved = true
+      }
+    }
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed save file: " + e.stackTraceToString())
+  }
+  if (!quiet) showToast(if (saved) "Guardado" else "No se pudo guardar")
+}
