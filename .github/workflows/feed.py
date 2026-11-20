@@ -10,9 +10,12 @@
 - Reacciones estilo Facebook: botones «Reaccionar» (con la bandeja de emojis) y «Comentar».
 - La lista de chats se ordena por el último mensaje real, no por la actividad del feed.
 - Comentarios con foto de perfil, respuestas a comentarios, e imágenes o videos adjuntos; se ve quién reaccionó.
-- A un contacto nuevo se le reenvían tus publicaciones anteriores (con sus comentarios y reacciones).
+- A un contacto nuevo se le reenvían tus publicaciones anteriores (con sus comentarios y reacciones); las
+  primeras 20 solas, y el botón «Actualizar» del Feed envía todas las que le falten (sin tope).
+- Editar publicaciones y comentarios propios (lápiz): se ve «editado» y se puede abrir el original.
+- Compartir una publicación (📤): en tu propio Feed o hacia otra app del teléfono.
 - Aviso (globito con número) en la pestaña «Feed» cuando hay publicaciones nuevas.
-- Reacciones (👍 ❤️ 😂 😮 😢 🙏) y comentarios, visibles para todos los que recibieron la publicación
+- Reacciones (👍 ❤️ 😂 😮 😢 😡, y «＋» para cualquier otro emoji) y comentarios, visibles para todos los que recibieron la publicación
   (el autor reenvía lo que recibe al resto de sus contactos).
 - Sin cambios de protocolo: todo son mensajes normales con una cabecera (ver ZetariaFeed.kt).
 - Los mensajes del feed no se ven en el chat, no mueven ni cambian la fila de la lista de chats, no cuentan como
