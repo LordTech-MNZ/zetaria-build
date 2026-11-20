@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -22,12 +23,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import chat.simplex.common.model.*
 import chat.simplex.common.model.ChatController.appPrefs
+import chat.simplex.common.platform.AudioPlayer
 import chat.simplex.common.platform.Log
 import chat.simplex.common.platform.TAG
 import chat.simplex.common.platform.VideoPlayer
 import chat.simplex.common.platform.VideoPlayerHolder
 import chat.simplex.common.platform.base64ToBitmap
 import chat.simplex.common.platform.chatModel
+import chat.simplex.common.platform.getAppFilePath
 import chat.simplex.common.platform.getLoadedFilePath
 import chat.simplex.common.platform.getLoadedFileSource
 import chat.simplex.common.platform.openFile
@@ -53,11 +56,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 //   Reacción             "💟 ζ·<pid> <emoji>"  ("-" = quitar)          lector -> autor
 //   Reacción reenviada   "💠 ζ·<pid> <clave> <emoji> <nombre>"         autor -> demás contactos
 //   Eliminar publicación "🗑 ζ·<pid>"                                  autor -> todos sus contactos
+//   Eliminar comentario  "🗑 ζ·<pid>" + "↪ <cid>"                       quien comentó -> autor -> demás contactos
 //
 // Después de la primera línea pueden venir líneas de datos opcionales:
 //   "↪ <cid>"       responde a ese comentario (o, en una reacción, reacciona a ese comentario)
 //   "🪪 <imagen>"   foto de perfil en miniatura de quien comenta o reacciona
 //   "🕒 <segundos>" fecha original (al reenviar publicaciones antiguas a un contacto nuevo)
+//   "🔘 <opción>"   opción de una encuesta (en la publicación); un voto es una reacción con emoji "#1".."#6" ("#0" = retirar)
 // y luego el texto. Publicaciones y comentarios pueden llevar una imagen o un video adjunto.
 //
 // El autor hace de "centro": reenvía los comentarios y reacciones que recibe al resto de sus contactos, y
@@ -75,9 +80,12 @@ private const val ZF_DEL = "🗑 ζ·"
 private const val ZF_META_REPLY = "↪ "
 private const val ZF_META_AVATAR = "🪪 "
 private const val ZF_META_TIME = "🕒 "
+private const val ZF_META_OPT = "🔘 "
 private const val ZF_MAX_TEXT = 3000
 private const val ZF_MAX_COMMENT = 1000
 private const val ZF_MAX_VIDEO_BYTES = 60L * 1024L * 1024L
+private const val ZF_MAX_AUDIO_BYTES = 25L * 1024L * 1024L
+private const val ZF_MAX_OPTIONS = 6
 private const val ZF_BACKFILL_POSTS = 20
 private const val ZF_BACKFILL_ITEMS = 40
 private const val ZF_AUTOSAVE_KEY = "zetaria_auto_save_images"
@@ -115,14 +123,16 @@ private class ZfHead(
   val body: String,
   val reply: String,
   val avatar: String,
-  val origSec: Long
+  val origSec: Long,
+  val options: List<String>
 )
 
 private val zfPidRe = Regex("^[0-9a-f]{10}$")
 private val zfCidRe = Regex("^[0-9a-f]{8}$")
 private val zfKeyRe = Regex("^[A-Za-z0-9]{1,24}$")
+private val zfVoteRe = Regex("^#[0-6]$")
 
-private fun zfValidEmoji(s: String): Boolean = s == "-" || ZF_EMOJIS.contains(s)
+private fun zfValidEmoji(s: String): Boolean = s == "-" || ZF_EMOJIS.contains(s) || zfVoteRe.matches(s)
 
 private fun zfParseText(text: String): ZfHead? {
   if (!text.contains(ZF_TOK)) return null
@@ -131,10 +141,14 @@ private fun zfParseText(text: String): ZfHead? {
   var reply = ""
   var avatar = ""
   var origSec = 0L
+  val options = ArrayList<String>()
   var i = 1
   while (i < lines.size) {
     val ln = lines[i]
-    if (ln.startsWith(ZF_META_REPLY)) {
+    if (ln.startsWith(ZF_META_OPT)) {
+      val v = ln.substring(ZF_META_OPT.length).trim()
+      if (v.isNotEmpty() && options.size < ZF_MAX_OPTIONS) options.add(v.take(80))
+    } else if (ln.startsWith(ZF_META_REPLY)) {
       val v = ln.substring(ZF_META_REPLY.length).trim()
       if (zfCidRe.matches(v)) reply = v
     } else if (ln.startsWith(ZF_META_AVATAR)) {
@@ -152,34 +166,34 @@ private fun zfParseText(text: String): ZfHead? {
   if (head.startsWith(ZF_POST)) {
     val pid = head.substring(ZF_POST.length).trim()
     if (!zfPidRe.matches(pid)) return null
-    return ZfHead(ZfKind.POST, pid, "", "", "", "", body, "", "", origSec)
+    return ZfHead(ZfKind.POST, pid, "", "", "", "", body, "", "", origSec, options)
   }
   if (head.startsWith(ZF_COMMENT)) {
     val parts = head.substring(ZF_COMMENT.length).trim().split(" ")
     if (parts.size != 2 || !zfPidRe.matches(parts[0]) || !zfCidRe.matches(parts[1])) return null
-    return ZfHead(ZfKind.COMMENT, parts[0], parts[1], "", "", "", body, reply, "", 0L)
+    return ZfHead(ZfKind.COMMENT, parts[0], parts[1], "", "", "", body, reply, "", 0L, emptyList())
   }
   if (head.startsWith(ZF_CREL)) {
     val parts = head.substring(ZF_CREL.length).trim().split(" ", limit = 4)
     if (parts.size < 3 || !zfPidRe.matches(parts[0]) || !zfCidRe.matches(parts[1]) || !zfKeyRe.matches(parts[2])) return null
     val name = if (parts.size > 3) parts[3].trim() else ""
-    return ZfHead(ZfKind.CREL, parts[0], parts[1], parts[2], name, "", body, reply, avatar, origSec)
+    return ZfHead(ZfKind.CREL, parts[0], parts[1], parts[2], name, "", body, reply, avatar, origSec, emptyList())
   }
   if (head.startsWith(ZF_REACT)) {
     val parts = head.substring(ZF_REACT.length).trim().split(" ")
     if (parts.size != 2 || !zfPidRe.matches(parts[0]) || !zfValidEmoji(parts[1])) return null
-    return ZfHead(ZfKind.REACT, parts[0], "", "", "", parts[1], "", reply, "", 0L)
+    return ZfHead(ZfKind.REACT, parts[0], "", "", "", parts[1], "", reply, "", 0L, emptyList())
   }
   if (head.startsWith(ZF_RREL)) {
     val parts = head.substring(ZF_RREL.length).trim().split(" ", limit = 4)
     if (parts.size < 3 || !zfPidRe.matches(parts[0]) || !zfKeyRe.matches(parts[1]) || !zfValidEmoji(parts[2])) return null
     val name = if (parts.size > 3) parts[3].trim() else ""
-    return ZfHead(ZfKind.RREL, parts[0], "", parts[1], name, parts[2], "", reply, avatar, origSec)
+    return ZfHead(ZfKind.RREL, parts[0], "", parts[1], name, parts[2], "", reply, avatar, origSec, emptyList())
   }
   if (head.startsWith(ZF_DEL)) {
     val pid = head.substring(ZF_DEL.length).trim()
     if (!zfPidRe.matches(pid)) return null
-    return ZfHead(ZfKind.DEL, pid, "", "", "", "", "", "", "", 0L)
+    return ZfHead(ZfKind.DEL, pid, "", "", "", "", "", reply, "", 0L, emptyList())
   }
   return null
 }
@@ -193,10 +207,12 @@ private fun zfHeadOf(ci: ChatItem): ZfHead? {
   if (ci.meta.itemDeleted != null) return null
   val mc = ci.content.msgContent ?: return null
   val media = mc is MsgContent.MCImage || mc is MsgContent.MCVideo
-  if (!media && mc !is MsgContent.MCText) return null
+  val audio = mc is MsgContent.MCFile
+  if (!media && !audio && mc !is MsgContent.MCText) return null
   val h = zfParseText(mc.text) ?: return null
-  // solo publicaciones y comentarios llevan imagen o video
+  // solo publicaciones y comentarios llevan imagen o video; solo las publicaciones llevan audio
   if (media && h.kind != ZfKind.POST && h.kind != ZfKind.COMMENT && h.kind != ZfKind.CREL) return null
+  if (audio && h.kind != ZfKind.POST) return null
   return h
 }
 
@@ -218,6 +234,7 @@ private class ZfEvent(
   val body: String,
   val reply: String,
   val avatar: String,
+  val options: List<String>,
   val rh: Long?,
   val chatId: String,
   val contactId: Long,
@@ -235,7 +252,7 @@ private fun zfEventOf(rh: Long?, cInfo: ChatInfo, ci: ChatItem): ZfEvent? {
   val h = zfHeadOf(ci) ?: return null
   val ts = if (h.origSec > 0L) h.origSec * 1000L else ci.meta.itemTs.toEpochMilliseconds()
   return ZfEvent(
-    h.kind, h.pid, h.cid, h.key, h.name, h.emoji, h.body, h.reply, h.avatar,
+    h.kind, h.pid, h.cid, h.key, h.name, h.emoji, h.body, h.reply, h.avatar, h.options,
     rh, cInfo.id, cInfo.contact.contactId, cInfo.displayName, cInfo.image,
     ci.chatDir.sent, ts, ci.meta.createdAt.toEpochMilliseconds(), ci.id, ci
   )
@@ -416,8 +433,14 @@ private class ZfPost(
   val comments: List<ZfComment>,
   val counts: Map<String, Int>,
   val myReaction: String?,
-  val reactors: List<ZfReactor>
+  val reactors: List<ZfReactor>,
+  val options: List<String>,
+  val voteCounts: List<Int>,
+  val myVote: Int,
+  val voters: List<ZfVoter>
 )
+
+private class ZfVoter(val key: String, val name: String, val avatar: String?, val option: Int)
 
 private class ZfReact(val tsMs: Long, val emoji: String, val name: String, val avatar: String?)
 
@@ -425,6 +448,8 @@ private class ZfAcc(val key: String, var ev: ZfEvent, val mine: Boolean) {
   val comments = HashMap<String, ZfComment>()
   val reacts = HashMap<String, ZfReact>()
   val creacts = HashMap<String, HashMap<String, ZfReact>>()   // comentario -> quien -> reacción
+  val votes = HashMap<String, ZfReact>()                      // quien -> voto de la encuesta ("#1".."#6", "#0" = retirado)
+  val deletedComments = HashSet<String>()
   val chats = HashSet<String>()
 }
 
@@ -436,6 +461,13 @@ private fun zfAddComment(a: ZfAcc, e: ZfEvent, key: String, name: String, avatar
 }
 
 private fun zfAddReact(a: ZfAcc, e: ZfEvent, reactor: String, name: String, avatar: String?) {
+  if (e.emoji.startsWith("#")) {
+    // voto de una encuesta (solo en la publicación)
+    if (e.reply.isNotEmpty()) return
+    val pv = a.votes[reactor]
+    if (pv == null || e.tsMs >= pv.tsMs) a.votes[reactor] = ZfReact(e.tsMs, e.emoji, name, avatar)
+    return
+  }
   val map = if (e.reply.isEmpty()) a.reacts else a.creacts.getOrPut(e.reply) { HashMap() }
   val prev = map[reactor]
   if (prev == null || e.tsMs >= prev.tsMs) map[reactor] = ZfReact(e.tsMs, e.emoji, name, avatar)
@@ -470,9 +502,16 @@ private fun zfBuildPosts(): List<ZfPost> {
   val theirAcc = HashMap<String, ZfAcc>()  // "pid|chat" -> publicación de un contacto
   val deletedMine = HashSet<String>()      // pid de publicaciones mías eliminadas
   val deletedTheirs = HashSet<String>()    // "pid|chat" de publicaciones eliminadas por su autor
+  val delComments = ArrayList<ZfEvent>()   // eliminaciones de comentarios
   for (e in all) {
     if (e.kind == ZfKind.DEL) {
-      if (e.sent) deletedMine.add(e.pid) else deletedTheirs.add(e.pid + "|" + e.chatId)
+      if (e.reply.isNotEmpty()) {
+        delComments.add(e)
+      } else if (e.sent) {
+        deletedMine.add(e.pid)
+      } else {
+        deletedTheirs.add(e.pid + "|" + e.chatId)
+      }
     }
   }
   for (e in all) {
@@ -532,6 +571,26 @@ private fun zfBuildPosts(): List<ZfPost> {
       }
     }
   }
+  for (e in delComments) {
+    if (e.sent) {
+      // yo eliminé un comentario (mío, o lo reenvié como autor tras validarlo)
+      val a = mineAcc[e.pid] ?: theirAcc[e.pid + "|" + e.chatId]
+      if (a != null) a.deletedComments.add(e.reply)
+    } else {
+      val t = theirAcc[e.pid + "|" + e.chatId]
+      if (t != null) {
+        // el autor avisa que se eliminó un comentario
+        t.deletedComments.add(e.reply)
+      } else {
+        // un contacto elimina su propio comentario en mi publicación
+        val m = mineAcc[e.pid]
+        if (m != null && m.chats.contains(e.chatId)) {
+          val cm = m.comments[e.reply]
+          if (cm != null && cm.key == "c" + e.contactId) m.deletedComments.add(e.reply)
+        }
+      }
+    }
+  }
   val res = ArrayList<ZfPost>()
   for (a in mineAcc.values + theirAcc.values) {
     if (a.mine && (deletedMine.contains(a.ev.pid) || zfIsDeletedLocal(a.ev.pid))) continue
@@ -545,7 +604,8 @@ private fun zfBuildPosts(): List<ZfPost> {
       reactors.add(ZfReactor(en.key, r.name, r.emoji, r.avatar))
     }
     val myKey = if (a.mine) "a" else "me"
-    for (cm in a.comments.values) {
+    val liveComments = a.comments.values.filter { !a.deletedComments.contains(it.cid) }
+    for (cm in liveComments) {
       val cr = a.creacts[cm.cid] ?: continue
       val cc = HashMap<String, Int>()
       val rs = ArrayList<ZfReactor>()
@@ -561,6 +621,17 @@ private fun zfBuildPosts(): List<ZfPost> {
       cm.myReaction = if (my == null || my == "-") null else my
     }
     val mr = a.reacts[myKey]?.emoji
+    val opts = a.ev.options
+    val vc = ArrayList<Int>()
+    for (i in opts.indices) vc.add(0)
+    val voters = ArrayList<ZfVoter>()
+    for (en in a.votes.entries) {
+      val idx = en.value.emoji.removePrefix("#").toIntOrNull() ?: continue
+      if (idx < 1 || idx > opts.size) continue
+      vc[idx - 1] = vc[idx - 1] + 1
+      voters.add(ZfVoter(en.key, en.value.name, en.value.avatar, idx))
+    }
+    val mv = a.votes[myKey]?.emoji?.removePrefix("#")?.toIntOrNull() ?: 0
     res.add(
       ZfPost(
         key = a.key,
@@ -573,10 +644,14 @@ private fun zfBuildPosts(): List<ZfPost> {
         chatId = a.ev.chatId,
         text = a.ev.body,
         tsMs = a.ev.tsMs,
-        comments = a.comments.values.sortedBy { it.tsMs },
+        comments = liveComments.sortedBy { it.tsMs },
         counts = counts,
         myReaction = if (mr == null || mr == "-") null else mr,
-        reactors = reactors
+        reactors = reactors,
+        options = opts,
+        voteCounts = vc,
+        myVote = if (mv >= 1 && mv <= opts.size) mv else 0,
+        voters = voters
       )
     )
   }
@@ -699,14 +774,20 @@ private fun zfFileOf(ci: ChatItem): CryptoFile? {
 private fun zfMakeContent(orig: MsgContent?, text: String): MsgContent = when (orig) {
   is MsgContent.MCImage -> MsgContent.MCImage(text, orig.image)
   is MsgContent.MCVideo -> MsgContent.MCVideo(text, orig.image, orig.duration)
+  is MsgContent.MCFile -> MsgContent.MCFile(text)
   else -> MsgContent.MCText(text)
 }
 
 private class ZfOut(val mc: MsgContent?, val file: CryptoFile?, val error: String?)
 
 /** Prepara el contenido (texto, imagen o video) de una publicación o comentario. */
-private suspend fun zfPrepare(media: URI?, video: Boolean, caption: String): ZfOut {
+private suspend fun zfPrepare(media: URI?, video: Boolean, caption: String, audio: Boolean = false): ZfOut {
   if (media == null) return ZfOut(MsgContent.MCText(caption), null, null)
+  if (audio) {
+    val file = saveFileFromUri(media, ZF_MAX_AUDIO_BYTES, hiddenFileNamePrefix = "audio")
+      ?: return ZfOut(null, null, "No se pudo preparar el audio (máximo 25 MB).")
+    return ZfOut(MsgContent.MCFile(caption), file, null)
+  }
   if (!video) {
     val bmp = getBitmapFromUri(media) ?: return ZfOut(null, null, "No se pudo leer la imagen.")
     val preview = resizeImageToStrSize(bmp, maxDataSize = 14000)
@@ -723,11 +804,14 @@ private suspend fun zfPrepare(media: URI?, video: Boolean, caption: String): ZfO
 }
 
 /** Publica en el feed. Devuelve null si salió bien, o el motivo del error. */
-private suspend fun zfPublish(text: String, media: URI?, video: Boolean): String? {
+private suspend fun zfPublish(text: String, media: URI?, video: Boolean, audio: Boolean, options: List<String>): String? {
   val targets = withContext(Dispatchers.Main) { zfTargets() }
   if (targets.isEmpty()) return "Aún no tienes contactos conectados a quienes publicar."
-  val caption = ZF_POST + zfNewId(10) + (if (text.isEmpty()) "" else "\n" + text)
-  val out = zfPrepare(media, video, caption)
+  val lines = ArrayList<String>()
+  lines.add(ZF_POST + zfNewId(10))
+  for (o in options) lines.add(ZF_META_OPT + o.replace("\n", " ").trim().take(80))
+  if (text.isNotEmpty()) lines.add(text)
+  val out = zfPrepare(if (options.isEmpty()) media else null, video, lines.joinToString("\n"), audio)
   val err = out.error
   if (err != null) return err
   val mc = out.mc ?: return "No se pudo preparar la publicación."
@@ -797,6 +881,21 @@ private suspend fun zfDeletePost(p: ZfPost): Boolean {
   return true
 }
 
+/** Elimina un comentario mío: desaparece del feed de todos. */
+private suspend fun zfDeleteComment(p: ZfPost, cm: ZfComment): Boolean {
+  val msg = ZF_DEL + p.pid + "\n" + ZF_META_REPLY + cm.cid
+  if (!p.mine) {
+    val c = withContext(Dispatchers.Main) { zfChatById(p.chatId) } ?: return false
+    return zfSendOne(c, MsgContent.MCText(msg), null)
+  }
+  val targets = withContext(Dispatchers.Main) { zfTargets() }
+  var ok = false
+  for (c in targets) {
+    if (zfSendOne(c, MsgContent.MCText(msg), null)) ok = true
+  }
+  return ok
+}
+
 // ---------------------------------------------------------------------------
 // Mensajes que llegan: se marcan como leídos (no cuentan como mensaje sin leer), entran al feed y,
 // si soy el autor, reenvío los comentarios y reacciones al resto de mis contactos.
@@ -829,7 +928,7 @@ private suspend fun zfHandleIncoming(rhId: Long?, user: UserLike, cInfo: ChatInf
     zfBump()
   }
   if (ev.sent) return
-  if (ev.kind != ZfKind.COMMENT && ev.kind != ZfKind.REACT) return
+  if (ev.kind != ZfKind.COMMENT && ev.kind != ZfKind.REACT && !(ev.kind == ZfKind.DEL && ev.reply.isNotEmpty())) return
   if (ev.kind == ZfKind.COMMENT) {
     val f = ci.file
     if (f != null && zfFileOf(ci) == null) {
@@ -845,15 +944,18 @@ private suspend fun zfHandleIncoming(rhId: Long?, user: UserLike, cInfo: ChatInf
 private suspend fun zfRelayFromContact(rhId: Long?, cInfo: ChatInfo, ev: ZfEvent) {
   val r = zfGetChatQuiet(rhId, cInfo.apiId, ChatPagination.Last(300), ev.pid) ?: return
   var mineHere = false
+  var commentFromHim = false
   for (x in r.first.chatItems) {
-    if (!x.chatDir.sent) continue
     val xe = zfEventOf(rhId, r.first.chatInfo, x) ?: continue
-    if (xe.kind == ZfKind.POST && xe.pid == ev.pid) {
-      mineHere = true
-      break
+    if (x.chatDir.sent) {
+      if (xe.kind == ZfKind.POST && xe.pid == ev.pid) mineHere = true
+    } else if (xe.kind == ZfKind.COMMENT && xe.pid == ev.pid && xe.cid == ev.reply) {
+      commentFromHim = true
     }
   }
   if (!mineHere) return
+  // solo quien escribió un comentario puede eliminarlo
+  if (ev.kind == ZfKind.DEL && !commentFromHim) return
   val targets = withContext(Dispatchers.Main) { zfTargets() }.filter { it.chatInfo.id != cInfo.id }
   if (targets.isEmpty()) return
   val key = "c" + ev.contactId
@@ -861,7 +963,10 @@ private suspend fun zfRelayFromContact(rhId: Long?, cInfo: ChatInfo, ev: ZfEvent
   val avatar = zfSmallAvatar(ev.chatImage)
   val lines = ArrayList<String>()
   var src: CryptoFile? = null
-  if (ev.kind == ZfKind.COMMENT) {
+  if (ev.kind == ZfKind.DEL) {
+    lines.add(ZF_DEL + ev.pid)
+    lines.add(ZF_META_REPLY + ev.reply)
+  } else if (ev.kind == ZfKind.COMMENT) {
     lines.add(ZF_CREL + ev.pid + " " + ev.cid + " " + key + " " + name)
     if (ev.reply.isNotEmpty()) lines.add(ZF_META_REPLY + ev.reply)
     if (avatar != null) lines.add(ZF_META_AVATAR + avatar)
@@ -997,6 +1102,10 @@ private suspend fun zfBackfillContact(user: UserLike, contactId: Long, wait: Boo
         zfSendReactionCopy(chat, p, rc, null)
         delay(100)
       }
+      for (v in p.voters.take(ZF_BACKFILL_ITEMS)) {
+        zfSendReactionCopy(chat, p, ZfReactor(v.key, v.name, "#" + v.option, v.avatar), null)
+        delay(100)
+      }
     }
     if (allOk) zfSetFlag(flag)
     return allOk
@@ -1024,6 +1133,7 @@ private suspend fun zfReconcile() {
 private suspend fun zfSendPostCopy(c: Chat, p: ZfPost): Boolean {
   val lines = ArrayList<String>()
   lines.add(ZF_POST + p.pid)
+  for (o in p.options) lines.add(ZF_META_OPT + o)
   lines.add(ZF_META_TIME + (p.tsMs / 1000L))
   if (p.text.isNotEmpty()) lines.add(p.text)
   val src = zfFileOf(p.ci)
@@ -1474,6 +1584,10 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
 @Composable
 private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
   val mc = ci.content.msgContent
+  if (mc is MsgContent.MCFile) {
+    ZfAudio(ci, rh)
+    return
+  }
   val isVideo = mc is MsgContent.MCVideo
   val previewStr = when (mc) {
     is MsgContent.MCImage -> mc.image
@@ -1586,22 +1700,160 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
 }
 
 // ---------------------------------------------------------------------------
+// Audio (MP3 y otros) con reproductor propio
+// ---------------------------------------------------------------------------
+@Composable
+private fun ZfAudioPlayer(file: CIFile, title: String) {
+  val src = remember(file.fileId) { getLoadedFileSource(file) }
+  val playing = remember(file.fileId) { mutableStateOf(false) }
+  val progress = remember(file.fileId) { mutableStateOf(0) }
+  val duration = remember(file.fileId) { mutableStateOf(0) }
+  var broken by remember(file.fileId) { mutableStateOf(false) }
+  var dragValue by remember(file.fileId) { mutableStateOf<Float?>(null) }
+  val secondary = MaterialTheme.colors.secondary
+  val onBg = MaterialTheme.colors.onBackground
+  // la duración de un archivo sin cifrar se conoce de antes; si no, se sabe al empezar a reproducir
+  LaunchedEffect(file.fileId) {
+    if (src != null && src.cryptoArgs == null) {
+      val d = withContext(Dispatchers.IO) {
+        try {
+          AudioPlayer.duration(getAppFilePath(src.filePath))
+        } catch (e: Exception) {
+          null
+        }
+      }
+      if (d != null) duration.value = d
+    }
+  }
+  DisposableEffect(file.fileId) {
+    onDispose {
+      if (playing.value) AudioPlayer.pause(playing, progress)
+    }
+  }
+  val play: () -> Unit = {
+    if (src != null) {
+      AudioPlayer.play(src, playing, progress, duration, true, false)
+      broken = !playing.value
+    }
+  }
+  val pause: () -> Unit = { AudioPlayer.pause(playing, progress) }
+  val total = duration.value
+  Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(secondary.copy(alpha = 0.12f)).padding(10.dp)) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      ZfRoundButton(if (playing.value) "⏸" else "▶", 44.dp, 20) {
+        if (playing.value) pause() else play()
+      }
+      Spacer(Modifier.width(10.dp))
+      Text("🎵 " + title, Modifier.weight(1f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = onBg)
+    }
+    val frac = dragValue ?: (if (total > 0) (progress.value.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f)
+    Slider(
+      value = frac,
+      onValueChange = { dragValue = it },
+      onValueChangeFinished = {
+        val dv = dragValue
+        if (dv != null && total > 0) AudioPlayer.seekTo((dv * total.toFloat()).toInt(), progress, src?.filePath)
+        dragValue = null
+      },
+      enabled = total > 0,
+      modifier = Modifier.fillMaxWidth()
+    )
+    Row(Modifier.fillMaxWidth()) {
+      Text(zfClock(progress.value.toLong()), fontSize = 11.sp, color = secondary)
+      Spacer(Modifier.weight(1f))
+      Text(zfClock(total.toLong()), fontSize = 11.sp, color = secondary)
+    }
+    if (broken) {
+      Text("No se pudo reproducir el audio", fontSize = 12.sp, color = MaterialTheme.colors.error)
+    }
+  }
+}
+
+@Composable
+private fun ZfAudio(ci: ChatItem, rh: Long?) {
+  val file = ci.file ?: return
+  var loadedFile by remember(ci.id) { mutableStateOf<CIFile?>(null) }
+  var attempt by remember(ci.id) { mutableStateOf(0) }
+  LaunchedEffect(ci.id, attempt) {
+    if (loadedFile != null) return@LaunchedEffect
+    var tries = 0
+    while (tries < 40) {
+      val probe = if (file.fileStatus.sent) file else file.copy(fileStatus = CIFileStatus.RcvComplete)
+      val ready = withContext(Dispatchers.IO) {
+        try {
+          getLoadedFilePath(probe) != null
+        } catch (e: Exception) {
+          false
+        }
+      }
+      if (ready) {
+        loadedFile = probe
+        break
+      }
+      tries++
+      delay(2000)
+    }
+  }
+  val lf = loadedFile
+  Spacer(Modifier.height(8.dp))
+  if (lf != null) {
+    ZfAudioPlayer(lf, file.fileName)
+  } else {
+    val waiting = file.fileStatus is CIFileStatus.RcvInvitation
+    Row(
+      Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(12.dp))
+        .background(MaterialTheme.colors.secondary.copy(alpha = 0.12f))
+        .clickable(enabled = waiting) {
+          val u = chatModel.currentUser.value
+          if (u != null) {
+            withLongRunningApi {
+              chatModel.controller.receiveFiles(rh, u, listOf(file.fileId), userApprovedRelays = false, auto = false)
+              withContext(Dispatchers.Main) { attempt = attempt + 1 }
+            }
+          }
+        }
+        .padding(12.dp),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Text("🎵", fontSize = 24.sp)
+      Spacer(Modifier.width(10.dp))
+      Column(Modifier.weight(1f)) {
+        Text(file.fileName, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colors.onBackground)
+        Text(
+          if (waiting) "⬇ Toca para descargar el audio" else "Descargando…",
+          fontSize = 12.sp,
+          color = MaterialTheme.colors.primary
+        )
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Elegir una imagen o un video (publicaciones y comentarios)
 // ---------------------------------------------------------------------------
 private class ZfPicked {
   var uri by mutableStateOf<URI?>(null)
   var video by mutableStateOf(false)
+  var audio by mutableStateOf(false)
+  var audioName by mutableStateOf("")
   var preview by mutableStateOf<ImageBitmap?>(null)
   var error by mutableStateOf<String?>(null)
 
   fun clear() {
     uri = null
     preview = null
+    audio = false
+    audioName = ""
   }
 }
 
+private class ZfPickers(val image: () -> Unit, val video: () -> Unit, val audio: () -> Unit)
+
 @Composable
-private fun rememberZfPickers(picked: ZfPicked): Pair<() -> Unit, () -> Unit> {
+private fun rememberZfPickers(picked: ZfPicked): ZfPickers {
   val scope = rememberCoroutineScope()
   val pickImage = rememberFileChooserLauncher(true) { uri: URI? ->
     if (uri != null) {
@@ -1611,6 +1863,7 @@ private fun rememberZfPickers(picked: ZfPicked): Pair<() -> Unit, () -> Unit> {
           if (bmp != null) {
             picked.uri = uri
             picked.video = false
+            picked.audio = false
             picked.preview = bmp
             picked.error = null
           } else {
@@ -1632,6 +1885,7 @@ private fun rememberZfPickers(picked: ZfPicked): Pair<() -> Unit, () -> Unit> {
           if (frame != null) {
             picked.uri = uri
             picked.video = true
+            picked.audio = false
             picked.preview = frame
             picked.error = null
           } else {
@@ -1641,15 +1895,45 @@ private fun rememberZfPickers(picked: ZfPicked): Pair<() -> Unit, () -> Unit> {
       }
     }
   }
+  val pickAudio = rememberFileChooserLauncher(true) { uri: URI? ->
+    if (uri != null) {
+      scope.launch(Dispatchers.IO) {
+        val name = try {
+          getFileName(uri)
+        } catch (e: Exception) {
+          null
+        }
+        withContext(Dispatchers.Main) {
+          picked.uri = uri
+          picked.video = false
+          picked.audio = true
+          picked.audioName = name ?: "audio"
+          picked.preview = null
+          picked.error = null
+        }
+      }
+    }
+  }
   val launchImage: () -> Unit = { scope.launch { pickImage.launch("image/*") } }
   val launchVideo: () -> Unit = { scope.launch { pickVideo.launch("video/*") } }
-  return Pair(launchImage, launchVideo)
+  val launchAudio: () -> Unit = { scope.launch { pickAudio.launch("audio/*") } }
+  return ZfPickers(launchImage, launchVideo, launchAudio)
 }
 
 @Composable
-private fun ZfPickedView(picked: ZfPicked, maxHeight: Dp, enabled: Boolean, launchImage: () -> Unit, launchVideo: () -> Unit) {
+private fun ZfPickedView(picked: ZfPicked, maxHeight: Dp, enabled: Boolean, pickers: ZfPickers, allowAudio: Boolean) {
   val pv = picked.preview
-  if (pv != null) {
+  if (picked.audio) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+      Text("🎵 " + picked.audioName, Modifier.weight(1f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      Text(
+        "✕ Quitar",
+        color = MaterialTheme.colors.error,
+        fontSize = 13.sp,
+        modifier = Modifier.clickable(enabled = enabled) { picked.clear() }.padding(8.dp)
+      )
+    }
+  } else if (pv != null) {
     Spacer(Modifier.height(8.dp))
     Box(Modifier.fillMaxWidth()) {
       Image(pv, null, Modifier.fillMaxWidth().heightIn(max = maxHeight).clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.Fit)
@@ -1669,14 +1953,22 @@ private fun ZfPickedView(picked: ZfPicked, maxHeight: Dp, enabled: Boolean, laun
         "📷 Imagen",
         color = MaterialTheme.colors.primary,
         fontSize = 14.sp,
-        modifier = Modifier.clickable(enabled = enabled) { launchImage() }.padding(vertical = 8.dp)
+        modifier = Modifier.clickable(enabled = enabled) { pickers.image() }.padding(vertical = 8.dp)
       )
       Text(
         "🎬 Video",
         color = MaterialTheme.colors.primary,
         fontSize = 14.sp,
-        modifier = Modifier.clickable(enabled = enabled) { launchVideo() }.padding(vertical = 8.dp)
+        modifier = Modifier.clickable(enabled = enabled) { pickers.video() }.padding(vertical = 8.dp)
       )
+      if (allowAudio) {
+        Text(
+          "🎵 Audio",
+          color = MaterialTheme.colors.primary,
+          fontSize = 14.sp,
+          modifier = Modifier.clickable(enabled = enabled) { pickers.audio() }.padding(vertical = 8.dp)
+        )
+      }
     }
   }
   val err = picked.error
@@ -1720,35 +2012,49 @@ private fun zfThread(comments: List<ZfComment>): List<Pair<ZfComment, Int>> {
 }
 
 @Composable
-private fun ZfReactionBar(counts: Map<String, Int>, mine: String?, small: Boolean, enabled: Boolean, onPick: (String) -> Unit) {
+private fun ZfEmojiTray(mine: String?, small: Boolean, onPick: (String) -> Unit) {
   val primary = MaterialTheme.colors.primary
   val secondary = MaterialTheme.colors.secondary
-  val onBg = MaterialTheme.colors.onBackground
-  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(if (small) 4.dp else 6.dp)) {
+  Row(
+    Modifier
+      .clip(RoundedCornerShape(26.dp))
+      .background(secondary.copy(alpha = 0.18f))
+      .padding(horizontal = 6.dp, vertical = 4.dp)
+      .horizontalScroll(rememberScrollState()),
+    horizontalArrangement = Arrangement.spacedBy(2.dp)
+  ) {
     for (em in ZF_EMOJIS) {
-      val n = counts[em] ?: 0
-      val sel = mine == em
-      Row(
+      Box(
         Modifier
-          .clip(RoundedCornerShape(16.dp))
-          .border(1.dp, if (sel) primary else secondary.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-          .clickable(enabled = enabled) { onPick(em) }
-          .padding(horizontal = if (small) 7.dp else 10.dp, vertical = if (small) 3.dp else 5.dp),
-        verticalAlignment = Alignment.CenterVertically
+          .clip(CircleShape)
+          .background(if (mine == em) primary.copy(alpha = 0.35f) else Color.Transparent)
+          .clickable { onPick(em) }
+          .padding(if (small) 5.dp else 7.dp)
       ) {
-        Text(em, fontSize = if (small) 13.sp else 16.sp)
-        if (n > 0) {
-          Spacer(Modifier.width(3.dp))
-          Text(n.toString(), fontSize = if (small) 11.sp else 13.sp, fontWeight = FontWeight.Bold, color = if (sel) primary else onBg)
-        }
+        Text(em, fontSize = if (small) 20.sp else 26.sp)
       }
     }
   }
 }
 
 @Composable
-private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String?, onReply: () -> Unit) {
+private fun ZfReactionSummary(counts: Map<String, Int>, small: Boolean, onClick: () -> Unit) {
+  val total = counts.values.sum()
+  if (total == 0) return
+  val top = counts.entries.sortedByDescending { it.value }.take(3).joinToString("") { it.key }
+  Row(Modifier.clickable { onClick() }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Text(top, fontSize = if (small) 13.sp else 16.sp)
+    Spacer(Modifier.width(4.dp))
+    Text(total.toString(), fontSize = if (small) 11.sp else 13.sp, color = MaterialTheme.colors.secondary)
+  }
+}
+
+@Composable
+private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String?, onReply: () -> Unit, onDelete: (() -> Unit)?) {
   var reacting by remember(c.cid) { mutableStateOf(false) }
+  var trayOpen by remember(c.cid) { mutableStateOf(false) }
+  var showReactors by remember(c.cid) { mutableStateOf(false) }
+  val primary = MaterialTheme.colors.primary
   val secondary = MaterialTheme.colors.secondary
   val onBg = MaterialTheme.colors.onBackground
   Row(Modifier.fillMaxWidth().padding(top = 10.dp, start = if (depth > 0) 30.dp else 0.dp)) {
@@ -1767,24 +2073,51 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
         Text(c.text, fontSize = 14.sp, color = onBg)
       }
       ZfMedia(c.ci, c.rh, true)
-      Spacer(Modifier.height(4.dp))
-      ZfReactionBar(c.counts, c.myReaction, true, !reacting) { em ->
-        reacting = true
-        withLongRunningApi {
-          try {
-            zfReact(p, if (c.myReaction == em) "-" else em, c.cid)
-          } finally {
-            withContext(Dispatchers.Main) { reacting = false }
+      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        val mr = c.myReaction
+        Text(
+          if (mr != null) mr + " Reaccionaste" else "Reaccionar",
+          fontSize = 12.sp,
+          fontWeight = FontWeight.SemiBold,
+          color = if (mr != null) primary else secondary,
+          modifier = Modifier.clickable { trayOpen = !trayOpen }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
+        )
+        Text(
+          "Responder",
+          fontSize = 12.sp,
+          fontWeight = FontWeight.SemiBold,
+          color = secondary,
+          modifier = Modifier.clickable { onReply() }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
+        )
+        if (onDelete != null) {
+          Text(
+            "Eliminar",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colors.error,
+            modifier = Modifier.clickable { onDelete() }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
+          )
+        }
+        Spacer(Modifier.weight(1f))
+        ZfReactionSummary(c.counts, true) { showReactors = true }
+      }
+      if (trayOpen) {
+        ZfEmojiTray(c.myReaction, true) { em ->
+          trayOpen = false
+          reacting = true
+          withLongRunningApi {
+            try {
+              zfReact(p, if (c.myReaction == em) "-" else em, c.cid)
+            } finally {
+              withContext(Dispatchers.Main) { reacting = false }
+            }
           }
         }
       }
-      Text(
-        "Responder",
-        fontSize = 12.sp,
-        color = MaterialTheme.colors.primary,
-        modifier = Modifier.clickable { onReply() }.padding(vertical = 6.dp)
-      )
     }
+  }
+  if (showReactors) {
+    ZfReactorsDialog(c.reactors) { showReactors = false }
   }
 }
 
@@ -1840,19 +2173,19 @@ private fun ZfCommentComposer(p: ZfPost, replyTo: ZfComment?, onClearReply: () -
         enabled = !busy && (draft.isNotBlank() || picked.uri != null)
       ) { Text("Enviar") }
     }
-    ZfPickedView(picked, 200.dp, !busy, pickers.first, pickers.second)
+    ZfPickedView(picked, 200.dp, !busy, pickers, false)
   }
 }
 
 @Composable
-private fun ZfReactorsDialog(p: ZfPost, onDismiss: () -> Unit) {
+private fun ZfReactorsDialog(reactors: List<ZfReactor>, onDismiss: () -> Unit) {
   Dialog(onDismissRequest = onDismiss) {
     Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
       Column(Modifier.padding(16.dp)) {
         Text("Reacciones", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
-          for (r in p.reactors.sortedBy { it.emoji }) {
+          for (r in reactors.sortedBy { it.emoji }) {
             Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
               ProfileImage(size = 36.dp, image = r.avatar)
               Spacer(Modifier.width(10.dp))
@@ -1870,13 +2203,45 @@ private fun ZfReactorsDialog(p: ZfPost, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun ZfDeleteDialog(busy: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+private fun ZfVotersDialog(p: ZfPost, onDismiss: () -> Unit) {
+  Dialog(onDismissRequest = onDismiss) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
+      Column(Modifier.padding(16.dp)) {
+        Text("Votantes", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
+          for (v in p.voters.sortedBy { it.option }) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+              ProfileImage(size = 36.dp, image = v.avatar)
+              Spacer(Modifier.width(10.dp))
+              Text(v.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+              Text(
+                if (v.option >= 1 && v.option <= p.options.size) p.options[v.option - 1] else "",
+                fontSize = 13.sp,
+                color = MaterialTheme.colors.secondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+              )
+            }
+          }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+          TextButton(onClick = onDismiss) { Text("Cerrar") }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ZfDeleteDialog(title: String, message: String, busy: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
   Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
     Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
       Column(Modifier.padding(16.dp)) {
-        Text("Eliminar publicación", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
-        Text("Dejará de verse en tu Feed y en el de tus contactos.", fontSize = 14.sp, color = MaterialTheme.colors.secondary)
+        Text(message, fontSize = 14.sp, color = MaterialTheme.colors.secondary)
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
           TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancelar") }
           TextButton(onClick = onConfirm, enabled = !busy) { Text("Eliminar", color = MaterialTheme.colors.error) }
@@ -1887,11 +2252,71 @@ private fun ZfDeleteDialog(busy: Boolean, onConfirm: () -> Unit, onDismiss: () -
 }
 
 @Composable
+private fun ZfPoll(p: ZfPost, onShowVoters: () -> Unit) {
+  var busy by remember(p.key) { mutableStateOf(false) }
+  val primary = MaterialTheme.colors.primary
+  val secondary = MaterialTheme.colors.secondary
+  val onBg = MaterialTheme.colors.onBackground
+  val total = p.voteCounts.sum()
+  Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+    Text("📊 Encuesta", fontSize = 12.sp, color = secondary)
+    for (i in p.options.indices) {
+      val n = if (i < p.voteCounts.size) p.voteCounts[i] else 0
+      val frac = if (total > 0) n.toFloat() / total.toFloat() else 0f
+      val sel = p.myVote == i + 1
+      Box(
+        Modifier
+          .fillMaxWidth()
+          .padding(top = 6.dp)
+          .height(44.dp)
+          .clip(RoundedCornerShape(10.dp))
+          .border(1.dp, if (sel) primary else secondary.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+          .clickable(enabled = !busy) {
+            busy = true
+            withLongRunningApi {
+              try {
+                zfReact(p, if (sel) "#0" else "#" + (i + 1), null)
+              } finally {
+                withContext(Dispatchers.Main) { busy = false }
+              }
+            }
+          }
+      ) {
+        if (frac > 0f) {
+          Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(primary.copy(alpha = 0.25f)))
+        }
+        Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+          Text(
+            (if (sel) "● " else "○ ") + p.options[i],
+            Modifier.weight(1f),
+            fontSize = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = onBg
+          )
+          Text((frac * 100f).toInt().toString() + "%", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = onBg)
+        }
+      }
+    }
+    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+      Text(total.toString() + (if (total == 1) " voto" else " votos"), Modifier.weight(1f), fontSize = 12.sp, color = secondary)
+      if (total > 0) {
+        Text("Ver votantes", fontSize = 12.sp, color = primary, modifier = Modifier.clickable { onShowVoters() }.padding(4.dp))
+      }
+    }
+  }
+}
+
+@Composable
 private fun ZfPostCard(p: ZfPost) {
   var showDelete by remember(p.key) { mutableStateOf(false) }
   var deleting by remember(p.key) { mutableStateOf(false) }
+  var commentToDelete by remember(p.key) { mutableStateOf<ZfComment?>(null) }
+  var deletingComment by remember(p.key) { mutableStateOf(false) }
   var showComments by remember(p.key) { mutableStateOf(false) }
   var showReactors by remember(p.key) { mutableStateOf(false) }
+  var showVoters by remember(p.key) { mutableStateOf(false) }
+  var trayOpen by remember(p.key) { mutableStateOf(false) }
   var replyTo by remember(p.key) { mutableStateOf<ZfComment?>(null) }
   var busy by remember(p.key) { mutableStateOf(false) }
   val primary = MaterialTheme.colors.primary
@@ -1920,47 +2345,86 @@ private fun ZfPostCard(p: ZfPost) {
       Spacer(Modifier.height(8.dp))
       Text(p.text, fontSize = 15.sp, color = onBg)
     }
+    if (p.options.isNotEmpty()) {
+      ZfPoll(p) { showVoters = true }
+    }
     ZfMedia(p.ci, p.rh, false)
-    Spacer(Modifier.height(10.dp))
-    ZfReactionBar(p.counts, p.myReaction, false, !busy) { em ->
-      busy = true
-      withLongRunningApi {
-        try {
-          zfReact(p, if (p.myReaction == em) "-" else em, null)
-        } finally {
-          withContext(Dispatchers.Main) { busy = false }
+    // resumen: reacciones a la izquierda, comentarios a la derecha
+    if (p.reactors.isNotEmpty() || p.comments.isNotEmpty()) {
+      Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        ZfReactionSummary(p.counts, false) { showReactors = true }
+        Spacer(Modifier.weight(1f))
+        if (p.comments.isNotEmpty()) {
+          Text(
+            p.comments.size.toString() + (if (p.comments.size == 1) " comentario" else " comentarios"),
+            fontSize = 13.sp,
+            color = secondary,
+            modifier = Modifier.clickable { showComments = !showComments }.padding(vertical = 4.dp)
+          )
         }
       }
     }
-    if (p.reactors.isNotEmpty()) {
+    Divider(Modifier.padding(top = 6.dp), color = secondary.copy(alpha = 0.25f))
+    // botones: Reaccionar | Comentar
+    Row(Modifier.fillMaxWidth()) {
+      val mr = p.myReaction
       Text(
-        "👥 " + p.reactors.size + (if (p.reactors.size == 1) " persona reaccionó" else " personas reaccionaron") + " · ver quiénes",
-        fontSize = 12.sp,
-        color = secondary,
-        modifier = Modifier.clickable { showReactors = true }.padding(vertical = 6.dp)
+        if (mr != null) mr + " Reaccionaste" else "🙂 Reaccionar",
+        Modifier.weight(1f).clickable { trayOpen = !trayOpen }.padding(vertical = 10.dp),
+        textAlign = TextAlign.Center,
+        fontWeight = FontWeight.SemiBold,
+        color = if (mr != null) primary else secondary
+      )
+      Text(
+        "💬 Comentar",
+        Modifier.weight(1f).clickable { showComments = !showComments }.padding(vertical = 10.dp),
+        textAlign = TextAlign.Center,
+        fontWeight = FontWeight.SemiBold,
+        color = if (showComments) primary else secondary
       )
     }
-    Text(
-      "💬 " + p.comments.size + (if (p.comments.size == 1) " comentario" else " comentarios"),
-      fontSize = 13.sp,
-      color = primary,
-      modifier = Modifier.clickable { showComments = !showComments }.padding(vertical = 8.dp)
-    )
+    if (trayOpen) {
+      Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        ZfEmojiTray(p.myReaction, false) { em ->
+          trayOpen = false
+          busy = true
+          withLongRunningApi {
+            try {
+              zfReact(p, if (p.myReaction == em) "-" else em, null)
+            } finally {
+              withContext(Dispatchers.Main) { busy = false }
+            }
+          }
+        }
+      }
+    }
     if (showComments) {
       val names = HashMap<String, String>()
       for (c in p.comments) names[c.cid] = c.name
       for (en in zfThread(p.comments)) {
         val c = en.first
-        ZfCommentRow(p, c, en.second, if (c.reply.isNotEmpty()) names[c.reply] else null) { replyTo = c }
+        ZfCommentRow(
+          p,
+          c,
+          en.second,
+          if (c.reply.isNotEmpty()) names[c.reply] else null,
+          { replyTo = c },
+          if (c.mine) ({ commentToDelete = c }) else null
+        )
       }
       ZfCommentComposer(p, replyTo) { replyTo = null }
     }
   }
   if (showReactors) {
-    ZfReactorsDialog(p) { showReactors = false }
+    ZfReactorsDialog(p.reactors) { showReactors = false }
+  }
+  if (showVoters) {
+    ZfVotersDialog(p) { showVoters = false }
   }
   if (showDelete) {
     ZfDeleteDialog(
+      title = "Eliminar publicación",
+      message = "Dejará de verse en tu Feed y en el de tus contactos.",
       busy = deleting,
       onConfirm = {
         deleting = true
@@ -1978,6 +2442,28 @@ private fun ZfPostCard(p: ZfPost) {
       onDismiss = { showDelete = false }
     )
   }
+  val cd = commentToDelete
+  if (cd != null) {
+    ZfDeleteDialog(
+      title = "Eliminar comentario",
+      message = "Dejará de verse para todos.",
+      busy = deletingComment,
+      onConfirm = {
+        deletingComment = true
+        withLongRunningApi {
+          try {
+            zfDeleteComment(p, cd)
+          } finally {
+            withContext(Dispatchers.Main) {
+              deletingComment = false
+              commentToDelete = null
+            }
+          }
+        }
+      },
+      onDismiss = { commentToDelete = null }
+    )
+  }
 }
 
 @Composable
@@ -1985,10 +2471,14 @@ private fun ZfPublishDialog(onDismiss: () -> Unit) {
   var text by remember { mutableStateOf("") }
   var busy by remember { mutableStateOf(false) }
   var error by remember { mutableStateOf<String?>(null) }
+  var pollOn by remember { mutableStateOf(false) }
+  val opts = remember { mutableStateListOf("", "") }
   val targetCount = remember { zfTargets().size }
   val picked = remember { ZfPicked() }
   val pickers = rememberZfPickers(picked)
+  val primary = MaterialTheme.colors.primary
   val secondary = MaterialTheme.colors.secondary
+  val pollReady = text.isNotBlank() && opts.count { it.isNotBlank() } >= 2
   Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
     Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
       Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
@@ -2003,11 +2493,51 @@ private fun ZfPublishDialog(onDismiss: () -> Unit) {
         OutlinedTextField(
           text,
           { if (it.length <= ZF_MAX_TEXT) text = it },
-          label = { Text("¿Qué quieres compartir?") },
+          label = { Text(if (pollOn) "Pregunta de la encuesta" else "¿Qué quieres compartir?") },
           modifier = Modifier.fillMaxWidth(),
           maxLines = 8
         )
-        ZfPickedView(picked, 260.dp, !busy, pickers.first, pickers.second)
+        if (pollOn) {
+          for (i in opts.indices) {
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+              OutlinedTextField(
+                opts[i],
+                { if (it.length <= 80) opts[i] = it },
+                label = { Text("Opción " + (i + 1)) },
+                modifier = Modifier.weight(1f),
+                singleLine = true
+              )
+              if (opts.size > 2) {
+                Text(
+                  "✕",
+                  color = MaterialTheme.colors.error,
+                  modifier = Modifier.clickable(enabled = !busy) { opts.removeAt(i) }.padding(10.dp)
+                )
+              }
+            }
+          }
+          if (opts.size < ZF_MAX_OPTIONS) {
+            Text(
+              "＋ Añadir opción",
+              color = primary,
+              fontSize = 14.sp,
+              modifier = Modifier.clickable(enabled = !busy) { opts.add("") }.padding(vertical = 10.dp)
+            )
+          }
+        } else {
+          ZfPickedView(picked, 260.dp, !busy, pickers, true)
+        }
+        Text(
+          if (pollOn) "✕ Quitar encuesta" else "📊 Añadir encuesta",
+          color = if (pollOn) MaterialTheme.colors.error else primary,
+          fontSize = 14.sp,
+          modifier = Modifier
+            .clickable(enabled = !busy) {
+              pollOn = !pollOn
+              if (pollOn) picked.clear()
+            }
+            .padding(vertical = 8.dp)
+        )
         val err = error
         if (err != null) {
           Text(err, color = MaterialTheme.colors.error, fontSize = 13.sp)
@@ -2022,12 +2552,14 @@ private fun ZfPublishDialog(onDismiss: () -> Unit) {
               val t = text.trim()
               val u = picked.uri
               val v = picked.video
+              val a = picked.audio
+              val options = if (pollOn) opts.map { it.trim() }.filter { it.isNotEmpty() } else emptyList()
               busy = true
               error = null
               withLongRunningApi {
                 var res: String? = "No se pudo publicar."
                 try {
-                  res = zfPublish(t, u, v)
+                  res = zfPublish(t, u, v, a, options)
                 } catch (e: Exception) {
                   Log.e(TAG, "zetaria feed publish: " + e.stackTraceToString())
                 } finally {
@@ -2038,7 +2570,7 @@ private fun ZfPublishDialog(onDismiss: () -> Unit) {
                 }
               }
             },
-            enabled = !busy && (text.isNotBlank() || picked.uri != null)
+            enabled = !busy && (if (pollOn) pollReady else (text.isNotBlank() || picked.uri != null))
           ) { Text("Publicar") }
         }
       }
