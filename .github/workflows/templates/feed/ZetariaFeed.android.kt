@@ -2,9 +2,20 @@ package chat.simplex.common.views.chat.item
 
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Intent
+import android.media.MediaMetadataRetriever
+import android.webkit.MimeTypeMap
 import android.os.Build
 import android.provider.MediaStore
 import chat.simplex.common.model.CIFile
+import chat.simplex.common.model.ChatModel
+import chat.simplex.common.model.CryptoFile
+import chat.simplex.common.model.readCryptoFile
+import chat.simplex.common.platform.CryptoMediaSource
+import chat.simplex.common.platform.getAppFilePath
+import chat.simplex.common.platform.tmpDir
+import chat.simplex.common.views.helpers.getAppFileUri
+import chat.simplex.common.helpers.toUri
 import chat.simplex.common.model.decryptCryptoFile
 import chat.simplex.common.platform.Log
 import chat.simplex.common.platform.TAG
@@ -180,5 +191,66 @@ actual suspend fun zetariaCleanGalleryDuplicates() {
     }
   } catch (e: Exception) {
     Log.e(TAG, "zetaria feed clean: " + e.stackTraceToString())
+  }
+}
+
+/**
+ * Compartir un archivo (imagen, video o audio) con el menú de Android, con el texto de la publicación como pie.
+ * kind: 1 = imagen, 2 = video, 3 = audio (se usa solo si Android no reconoce la extensión del archivo).
+ */
+actual fun zetariaShareFile(text: String, file: CryptoFile, kind: Int) {
+  try {
+    val uri = if (file.cryptoArgs != null) {
+      val tmpFile = File(tmpDir, file.filePath)
+      tmpFile.deleteOnExit()
+      ChatModel.filesToDelete.add(tmpFile)
+      decryptCryptoFile(getAppFilePath(file.filePath), file.cryptoArgs, tmpFile.absolutePath)
+      getAppFileUri(tmpFile.absolutePath)
+    } else {
+      getAppFileUri(file.filePath)
+    }
+    val ext = file.filePath.substringAfterLast('.', "").lowercase()
+    val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: when (kind) {
+      1 -> "image/*"
+      2 -> "video/*"
+      3 -> "audio/*"
+      else -> "*/*"
+    }
+    val send = Intent(Intent.ACTION_SEND).apply {
+      putExtra(Intent.EXTRA_STREAM, uri.toUri())
+      if (text.isNotEmpty()) putExtra(Intent.EXTRA_TEXT, text.take(4000))
+      type = mime
+      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val chooser = Intent.createChooser(send, null)
+    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    androidAppContext.startActivity(chooser)
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed share file: " + e.stackTraceToString())
+    showToast("No se pudo compartir el archivo")
+  }
+}
+
+/** Duración de un audio en milisegundos (también si está cifrado). null si no se pudo leer. */
+actual suspend fun zetariaAudioDuration(file: CryptoFile): Int? = withContext(Dispatchers.IO) {
+  val mmr = MediaMetadataRetriever()
+  try {
+    val path = if (file.isAbsolutePath) file.filePath else getAppFilePath(file.filePath)
+    val args = file.cryptoArgs
+    if (args != null) {
+      mmr.setDataSource(CryptoMediaSource(readCryptoFile(path, args)))
+    } else {
+      mmr.setDataSource(path)
+    }
+    val d = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toIntOrNull()
+    if (d != null && d > 0) d else null
+  } catch (e: Exception) {
+    Log.e(TAG, "zetaria feed audio duration: " + e.stackTraceToString())
+    null
+  } finally {
+    try {
+      mmr.release()
+    } catch (e: Exception) {
+    }
   }
 }

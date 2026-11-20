@@ -1,6 +1,10 @@
 package chat.simplex.common.views.chat.item
 
 import chat.simplex.common.model.CIFile
+import chat.simplex.common.model.CryptoFile
+import chat.simplex.common.platform.AudioPlayer
+import chat.simplex.common.platform.getAppFilePath
+import chat.simplex.common.platform.shareFile
 import chat.simplex.common.model.decryptCryptoFile
 import chat.simplex.common.platform.Log
 import chat.simplex.common.platform.TAG
@@ -54,3 +58,17 @@ actual fun zetariaVideoSeek(player: VideoPlayer, positionMs: Long) {
 
 /** Escritorio: no hay nada que limpiar. */
 actual suspend fun zetariaCleanGalleryDuplicates() {}
+
+/** Escritorio: se usa el compartir/abrir archivo de la app (el texto no viaja con el archivo). */
+actual fun zetariaShareFile(text: String, file: CryptoFile, kind: Int) {
+  shareFile(text, file)
+}
+
+/** Escritorio: la duración solo se conoce de antemano si el archivo no está cifrado. */
+actual suspend fun zetariaAudioDuration(file: CryptoFile): Int? = withContext(Dispatchers.IO) {
+  try {
+    if (file.cryptoArgs == null) AudioPlayer.duration(getAppFilePath(file.filePath)) else null
+  } catch (e: Exception) {
+    null
+  }
+}

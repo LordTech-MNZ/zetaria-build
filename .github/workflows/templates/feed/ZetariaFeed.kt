@@ -60,8 +60,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 //   Reacción reenviada   "💠 ζ·<pid> <clave> <emoji> <nombre>"         autor -> demás contactos
 //   Eliminar publicación "🗑 ζ·<pid>"                                  autor -> todos sus contactos
 //   Eliminar comentario  "🗑 ζ·<pid>" + "↪ <cid>"                       quien comentó -> autor -> demás contactos
-//   Editar publicación   "✏ ζ·<pid>" + texto nuevo                      autor -> todos sus contactos
-//   Editar comentario    "✏ ζ·<pid>" + "↪ <cid>" + texto nuevo          quien comentó -> autor -> demás contactos
+//   Editar publicación   "✏ ζ·<pid>" + texto nuevo (+ imagen/video/audio nuevo)   autor -> todos sus contactos
+//   Editar comentario    "✏ ζ·<pid>" + "↪ <cid>" + texto nuevo (+ imagen/video)    quien comentó -> autor -> demás contactos
+//   (en una edición, "🚫 1" quita el archivo adjunto; un archivo adjunto reemplaza al anterior)
 //
 // Después de la primera línea pueden venir líneas de datos opcionales:
 //   "↪ <cid>"       responde a ese comentario (o, en una reacción, reacciona a ese comentario)
@@ -87,6 +88,7 @@ private const val ZF_META_REPLY = "↪ "
 private const val ZF_META_AVATAR = "🪪 "
 private const val ZF_META_TIME = "🕒 "
 private const val ZF_META_OPT = "🔘 "
+private const val ZF_META_DROP = "🚫 "
 private const val ZF_MAX_TEXT = 3000
 private const val ZF_MAX_COMMENT = 1000
 private const val ZF_MAX_VIDEO_BYTES = 60L * 1024L * 1024L
@@ -115,6 +117,12 @@ fun zetariaSaveChatImageManual(ciFile: CIFile?) {
   }
 }
 
+/** Comparte un archivo (imagen, video o audio) con otras apps, con el texto como pie. kind: 1 imagen, 2 video, 3 audio. */
+expect fun zetariaShareFile(text: String, file: CryptoFile, kind: Int)
+
+/** Duración de un audio en milisegundos, también si está cifrado (null si no se pudo leer). */
+expect suspend fun zetariaAudioDuration(file: CryptoFile): Int?
+
 /** Mueve la reproducción de un video a una posición (milisegundos). */
 expect fun zetariaVideoSeek(player: VideoPlayer, positionMs: Long)
 
@@ -131,7 +139,8 @@ private class ZfHead(
   val reply: String,
   val avatar: String,
   val origSec: Long,
-  val options: List<String>
+  val options: List<String>,
+  val dropMedia: Boolean = false
 )
 
 private val zfPidRe = Regex("^[0-9a-f]{10}$")
@@ -159,6 +168,7 @@ private fun zfParseText(text: String): ZfHead? {
   var reply = ""
   var avatar = ""
   var origSec = 0L
+  var drop = false
   val options = ArrayList<String>()
   var i = 1
   while (i < lines.size) {
@@ -172,6 +182,8 @@ private fun zfParseText(text: String): ZfHead? {
     } else if (ln.startsWith(ZF_META_AVATAR)) {
       val v = ln.substring(ZF_META_AVATAR.length).trim()
       if (v.startsWith("data:image/") && v.length <= 12000) avatar = v
+    } else if (ln.startsWith(ZF_META_DROP)) {
+      drop = true
     } else if (ln.startsWith(ZF_META_TIME)) {
       val v = ln.substring(ZF_META_TIME.length).trim().toLongOrNull()
       if (v != null && v > 1_500_000_000L && v < 4_000_000_000L) origSec = v
@@ -216,7 +228,7 @@ private fun zfParseText(text: String): ZfHead? {
   if (head.startsWith(ZF_EDIT)) {
     val pid = head.substring(ZF_EDIT.length).trim()
     if (!zfPidRe.matches(pid)) return null
-    return ZfHead(ZfKind.EDIT, pid, "", "", "", "", body, reply, "", 0L, emptyList())
+    return ZfHead(ZfKind.EDIT, pid, "", "", "", "", body, reply, "", 0L, emptyList(), drop)
   }
   return null
 }
@@ -224,6 +236,12 @@ private fun zfParseText(text: String): ZfHead? {
 private fun zfIsMediaItem(ci: ChatItem): Boolean {
   val mc = ci.content.msgContent
   return mc is MsgContent.MCImage || mc is MsgContent.MCVideo
+}
+
+/** ¿Este mensaje lleva una imagen, un video o un audio adjunto? */
+private fun zfHasMedia(ci: ChatItem?): Boolean {
+  val mc = ci?.content?.msgContent
+  return mc is MsgContent.MCImage || mc is MsgContent.MCVideo || mc is MsgContent.MCFile
 }
 
 private fun zfHeadOf(ci: ChatItem): ZfHead? {
@@ -234,8 +252,9 @@ private fun zfHeadOf(ci: ChatItem): ZfHead? {
   if (!media && !audio && mc !is MsgContent.MCText) return null
   val h = zfParseText(mc.text) ?: return null
   // solo publicaciones y comentarios llevan imagen o video; solo las publicaciones llevan audio
-  if (media && h.kind != ZfKind.POST && h.kind != ZfKind.COMMENT && h.kind != ZfKind.CREL) return null
-  if (audio && h.kind != ZfKind.POST) return null
+  if (media && h.kind != ZfKind.POST && h.kind != ZfKind.COMMENT && h.kind != ZfKind.CREL && h.kind != ZfKind.EDIT) return null
+  // el audio solo va en publicaciones (y en sus ediciones, no en las de comentarios)
+  if (audio && h.kind != ZfKind.POST && !(h.kind == ZfKind.EDIT && h.reply.isEmpty())) return null
   return h
 }
 
@@ -267,7 +286,8 @@ private class ZfEvent(
   val tsMs: Long,
   val createdMs: Long,
   val itemId: Long,
-  val ci: ChatItem
+  val ci: ChatItem,
+  val dropMedia: Boolean = false
 )
 
 private fun zfEventOf(rh: Long?, cInfo: ChatInfo, ci: ChatItem): ZfEvent? {
@@ -277,7 +297,7 @@ private fun zfEventOf(rh: Long?, cInfo: ChatInfo, ci: ChatItem): ZfEvent? {
   return ZfEvent(
     h.kind, h.pid, h.cid, h.key, h.name, h.emoji, h.body, h.reply, h.avatar, h.options,
     rh, cInfo.id, cInfo.contact.contactId, cInfo.displayName, cInfo.image,
-    ci.chatDir.sent, ts, ci.meta.createdAt.toEpochMilliseconds(), ci.id, ci
+    ci.chatDir.sent, ts, ci.meta.createdAt.toEpochMilliseconds(), ci.id, ci, h.dropMedia
   )
 }
 
@@ -437,6 +457,8 @@ private class ZfComment(
   val rh: Long?
 ) {
   val origText: String = text
+  val origCi: ChatItem = ci
+  var mediaCi: ChatItem? = ci   // archivo que se muestra ahora (cambia si se edita; null = se quitó)
   var edited: Boolean = false
   var counts: Map<String, Int> = emptyMap()
   var myReaction: String? = null
@@ -456,6 +478,8 @@ private class ZfPost(
   val chatId: String,
   val text: String,
   val origText: String,
+  val origCi: ChatItem,
+  val mediaCi: ChatItem?,
   val edited: Boolean,
   val tsMs: Long,
   val comments: List<ZfComment>,
@@ -480,6 +504,8 @@ private class ZfAcc(val key: String, var ev: ZfEvent, val mine: Boolean) {
   val deletedComments = HashSet<String>()
   val chats = HashSet<String>()
   var editText: String? = null                                // texto vigente tras editar la publicación
+  var editMedia: ChatItem? = null                             // archivo nuevo tras editar
+  var editDrop: Boolean = false                               // se quitó el archivo
 }
 
 private fun zfAddComment(a: ZfAcc, e: ZfEvent, key: String, name: String, avatar: String?, mine: Boolean) {
@@ -521,6 +547,16 @@ private fun zfMarkDeletedLocal(pid: String) {
 
 private fun zfRelayedAvatar(e: ZfEvent): String? =
   if (e.key == "a") e.chatImage else (if (e.avatar.isEmpty()) null else e.avatar)
+
+private fun zfApplyCommentEdit(cm: ZfComment, e: ZfEvent) {
+  cm.text = e.body
+  cm.edited = true
+  if (e.dropMedia) {
+    cm.mediaCi = null
+  } else if (zfHasMedia(e.ci)) {
+    cm.mediaCi = e.ci
+  }
+}
 
 private fun zfBuildPosts(): List<ZfPost> {
   val all = ArrayList<ZfEvent>()
@@ -630,42 +666,39 @@ private fun zfBuildPosts(): List<ZfPost> {
     if (e.reply.isEmpty()) {
       // editar una publicación: solo la hace su autor
       val a = if (e.sent) mineAcc[e.pid] else theirAcc[e.pid + "|" + e.chatId]
-      if (a != null) a.editText = e.body
+      if (a != null && a.ev.options.isEmpty()) {
+        a.editText = e.body
+        if (e.dropMedia) {
+          a.editDrop = true
+          a.editMedia = null
+        } else if (zfHasMedia(e.ci)) {
+          a.editDrop = false
+          a.editMedia = e.ci
+        }
+      }
     } else if (e.sent) {
       // yo edité mi comentario (o, como autor, reenvié la edición de un contacto tras validarla)
       val m = mineAcc[e.pid]
       if (m != null) {
         val cm = m.comments[e.reply]
-        if (cm != null) {
-          cm.text = e.body
-          cm.edited = true
-        }
+        if (cm != null) zfApplyCommentEdit(cm, e)
       } else {
-        val t = theirAcc[e.pid + "|" + e.chatId]
-        val cm = t?.comments?.get(e.reply)
-        if (cm != null && cm.mine) {
-          cm.text = e.body
-          cm.edited = true
-        }
+        val th = theirAcc[e.pid + "|" + e.chatId]
+        val cm = th?.comments?.get(e.reply)
+        if (cm != null && cm.mine) zfApplyCommentEdit(cm, e)
       }
     } else {
-      val t = theirAcc[e.pid + "|" + e.chatId]
-      if (t != null) {
+      val th = theirAcc[e.pid + "|" + e.chatId]
+      if (th != null) {
         // el autor avisa que se editó un comentario
-        val cm = t.comments[e.reply]
-        if (cm != null) {
-          cm.text = e.body
-          cm.edited = true
-        }
+        val cm = th.comments[e.reply]
+        if (cm != null) zfApplyCommentEdit(cm, e)
       } else {
         // un contacto edita su propio comentario en mi publicación
         val m = mineAcc[e.pid]
         if (m != null && m.chats.contains(e.chatId)) {
           val cm = m.comments[e.reply]
-          if (cm != null && cm.key == "c" + e.contactId) {
-            cm.text = e.body
-            cm.edited = true
-          }
+          if (cm != null && cm.key == "c" + e.contactId) zfApplyCommentEdit(cm, e)
         }
       }
     }
@@ -723,6 +756,8 @@ private fun zfBuildPosts(): List<ZfPost> {
         chatId = a.ev.chatId,
         text = a.editText ?: a.ev.body,
         origText = a.ev.body,
+        origCi = a.ev.ci,
+        mediaCi = if (a.editDrop) null else (a.editMedia ?: a.ev.ci),
         edited = a.editText != null,
         tsMs = a.ev.tsMs,
         comments = liveComments.sortedBy { it.tsMs },
@@ -988,38 +1023,59 @@ private suspend fun zfDeleteComment(p: ZfPost, cm: ZfComment): Boolean {
   return ok
 }
 
-/** Edita el texto de una publicación mía: se actualiza en mi feed y en el de mis contactos. */
-private suspend fun zfEditPost(p: ZfPost, newText: String): String? {
+/** Lo que se envía al editar: texto nuevo y, opcionalmente, un archivo nuevo (uri) o quitar el actual (remove). */
+private class ZfEditInput(val text: String, val uri: URI?, val video: Boolean, val audio: Boolean, val remove: Boolean)
+
+/** Edita una publicación mía (texto, imagen, video o audio; las encuestas no se editan). */
+private suspend fun zfEditPost(p: ZfPost, inp: ZfEditInput): String? {
   if (!p.mine) return "Solo puedes editar tus publicaciones."
-  val t = newText.trim().replace("\r", "").take(ZF_MAX_TEXT)
-  val hasMedia = p.ci.content.msgContent.let { it is MsgContent.MCImage || it is MsgContent.MCVideo || it is MsgContent.MCFile }
-  if (t.isEmpty() && !hasMedia && p.options.isEmpty()) return "La publicación no puede quedar vacía."
-  if (t == p.text) return null
+  if (p.options.isNotEmpty()) return "Las encuestas no se pueden editar."
+  val t = inp.text.trim().replace("\r", "").take(ZF_MAX_TEXT)
+  val hadMedia = zfHasMedia(p.mediaCi)
+  val newHasMedia = inp.uri != null || (!inp.remove && hadMedia)
+  if (t.isEmpty() && !newHasMedia) return "La publicación no puede quedar vacía."
+  if (t == p.text && inp.uri == null && !(inp.remove && hadMedia)) return null
   val targets = withContext(Dispatchers.Main) { zfTargets() }
   if (targets.isEmpty()) return "Aún no tienes contactos conectados."
-  val msg = ZF_EDIT + p.pid + (if (t.isNotEmpty()) "\n" + t else "")
+  val lines = ArrayList<String>()
+  lines.add(ZF_EDIT + p.pid)
+  if (inp.uri == null && inp.remove && hadMedia) lines.add(ZF_META_DROP + "1")
+  if (t.isNotEmpty()) lines.add(t)
+  val out = zfPrepare(inp.uri, inp.video, lines.joinToString("\n"), inp.audio)
+  val err = out.error
+  if (err != null) return err
+  val mc = out.mc ?: return "No se pudo preparar la edición."
   var ok = false
   for (c in targets) {
-    if (zfSendOne(c, MsgContent.MCText(msg), null)) ok = true
+    if (zfSendOne(c, mc, out.file)) ok = true
   }
   return if (ok) null else "No se pudo enviar la edición."
 }
 
-/** Edita el texto de un comentario mío: se actualiza para todos. */
-private suspend fun zfEditComment(p: ZfPost, cm: ZfComment, newText: String): String? {
-  val t = newText.trim().replace("\r", "").take(ZF_MAX_COMMENT)
-  val hasMedia = zfIsMediaItem(cm.ci)
-  if (t.isEmpty() && !hasMedia) return "El comentario no puede quedar vacío."
-  if (t == cm.text) return null
-  val msg = ZF_EDIT + p.pid + "\n" + ZF_META_REPLY + cm.cid + (if (t.isNotEmpty()) "\n" + t else "")
+/** Edita un comentario mío (texto, imagen o video): se actualiza para todos. */
+private suspend fun zfEditComment(p: ZfPost, cm: ZfComment, inp: ZfEditInput): String? {
+  val t = inp.text.trim().replace("\r", "").take(ZF_MAX_COMMENT)
+  val hadMedia = zfHasMedia(cm.mediaCi)
+  val newHasMedia = inp.uri != null || (!inp.remove && hadMedia)
+  if (t.isEmpty() && !newHasMedia) return "El comentario no puede quedar vacío."
+  if (t == cm.text && inp.uri == null && !(inp.remove && hadMedia)) return null
+  val lines = ArrayList<String>()
+  lines.add(ZF_EDIT + p.pid)
+  lines.add(ZF_META_REPLY + cm.cid)
+  if (inp.uri == null && inp.remove && hadMedia) lines.add(ZF_META_DROP + "1")
+  if (t.isNotEmpty()) lines.add(t)
+  val out = zfPrepare(inp.uri, inp.video, lines.joinToString("\n"))
+  val err = out.error
+  if (err != null) return err
+  val mc = out.mc ?: return "No se pudo preparar la edición."
   if (!p.mine) {
     val c = withContext(Dispatchers.Main) { zfChatById(p.chatId) } ?: return "No se encontró el chat del autor."
-    return if (zfSendOne(c, MsgContent.MCText(msg), null)) null else "No se pudo enviar la edición."
+    return if (zfSendOne(c, mc, out.file)) null else "No se pudo enviar la edición."
   }
   val targets = withContext(Dispatchers.Main) { zfTargets() }
   var ok = false
   for (c in targets) {
-    if (zfSendOne(c, MsgContent.MCText(msg), null)) ok = true
+    if (zfSendOne(c, mc, out.file)) ok = true
   }
   return if (ok) null else "No se pudo enviar la edición."
 }
@@ -1038,8 +1094,9 @@ private suspend fun zfShareToFeed(p: ZfPost, note: String): String? {
   if (extra.isNotEmpty()) body.append("\n").append(extra)
   if (p.text.isNotEmpty()) body.append("\n\n").append(p.text)
   lines.add(body.toString().take(ZF_MAX_TEXT))
-  val src = zfFileOf(p.ci)
-  val mc = zfMakeContent(if (src != null) p.ci.content.msgContent else null, lines.joinToString("\n"))
+  val mci = p.mediaCi
+  val src = if (mci != null && zfHasMedia(mci)) zfFileOf(mci) else null
+  val mc = zfMakeContent(if (src != null) mci?.content?.msgContent else null, lines.joinToString("\n"))
   var ok = 0
   for (c in targets) {
     if (zfSendOne(c, mc, src)) {
@@ -1083,7 +1140,7 @@ private suspend fun zfHandleIncoming(rhId: Long?, user: UserLike, cInfo: ChatInf
   }
   if (ev.sent) return
   if (ev.kind != ZfKind.COMMENT && ev.kind != ZfKind.REACT && !((ev.kind == ZfKind.DEL || ev.kind == ZfKind.EDIT) && ev.reply.isNotEmpty())) return
-  if (ev.kind == ZfKind.COMMENT) {
+  if (ev.kind == ZfKind.COMMENT || ev.kind == ZfKind.EDIT) {
     val f = ci.file
     if (f != null && zfFileOf(ci) == null) {
       // comentario con imagen o video: se reenvía cuando el archivo termine de descargarse
@@ -1123,7 +1180,9 @@ private suspend fun zfRelayFromContact(rhId: Long?, cInfo: ChatInfo, ev: ZfEvent
   } else if (ev.kind == ZfKind.EDIT) {
     lines.add(ZF_EDIT + ev.pid)
     lines.add(ZF_META_REPLY + ev.reply)
+    if (ev.dropMedia) lines.add(ZF_META_DROP + "1")
     if (ev.body.isNotEmpty()) lines.add(ev.body)
+    src = zfFileOf(ev.ci)
   } else if (ev.kind == ZfKind.COMMENT) {
     lines.add(ZF_CREL + ev.pid + " " + ev.cid + " " + key + " " + name)
     if (ev.reply.isNotEmpty()) lines.add(ZF_META_REPLY + ev.reply)
@@ -1162,7 +1221,7 @@ private suspend fun zfHandleFileComplete(rhId: Long?, user: UserLike, cInfo: Cha
     if (zfAutoSaved.add(k)) zetariaSaveToGallery(file, false, false, true)
   }
   val ev = zfEventOf(rhId, cInfo, ci) ?: return
-  if (ev.sent || ev.kind != ZfKind.COMMENT) return
+  if (ev.sent || (ev.kind != ZfKind.COMMENT && !(ev.kind == ZfKind.EDIT && ev.reply.isNotEmpty()))) return
   if (!zfIsActiveUser(user)) return
   zfRelayFromContact(rhId, cInfo, ev)
 }
@@ -1306,19 +1365,40 @@ private suspend fun zfReconcile(force: Boolean = false) {
   }
 }
 
+/**
+ * Para un contacto nuevo que ya tiene el original: manda la edición vigente (texto y, si cambió, el archivo nuevo
+ * o la orden de quitarlo). replyCid = comentario editado (null = la publicación).
+ */
+private suspend fun zfSendEditCopy(c: Chat, pid: String, replyCid: String?, text: String, origCi: ChatItem, curCi: ChatItem?) {
+  val lines = ArrayList<String>()
+  lines.add(ZF_EDIT + pid)
+  if (replyCid != null) lines.add(ZF_META_REPLY + replyCid)
+  var src: CryptoFile? = null
+  var base: ChatItem? = null
+  if (curCi == null || !zfHasMedia(curCi)) {
+    if (zfHasMedia(origCi)) lines.add(ZF_META_DROP + "1")
+  } else if (curCi.id != origCi.id) {
+    src = zfFileOf(curCi)
+    base = curCi
+  }
+  if (text.isNotEmpty()) lines.add(text)
+  val mc = zfMakeContent(if (src != null) base?.content?.msgContent else null, lines.joinToString("\n"))
+  zfSendOne(c, mc, src)
+}
+
 private suspend fun zfSendPostCopy(c: Chat, p: ZfPost): Boolean {
   val lines = ArrayList<String>()
   lines.add(ZF_POST + p.pid)
   for (o in p.options) lines.add(ZF_META_OPT + o)
   lines.add(ZF_META_TIME + (p.tsMs / 1000L))
   if (p.origText.isNotEmpty()) lines.add(p.origText)
-  val src = zfFileOf(p.ci)
-  val mc = zfMakeContent(if (src != null) p.ci.content.msgContent else null, lines.joinToString("\n"))
+  val src = zfFileOf(p.origCi)
+  val mc = zfMakeContent(if (src != null) p.origCi.content.msgContent else null, lines.joinToString("\n"))
   val ok = zfSendOne(c, mc, src)
   // si se editó, el contacto nuevo recibe primero el original y luego la edición (así también ve el original)
   if (ok && p.edited) {
     delay(150)
-    zfSendOne(c, MsgContent.MCText(ZF_EDIT + p.pid + (if (p.text.isNotEmpty()) "\n" + p.text else "")), null)
+    zfSendEditCopy(c, p.pid, null, p.text, p.origCi, p.mediaCi)
   }
   return ok
 }
@@ -1332,12 +1412,12 @@ private suspend fun zfSendCommentCopy(c: Chat, p: ZfPost, cm: ZfComment): Boolea
   if (av != null) lines.add(ZF_META_AVATAR + av)
   lines.add(ZF_META_TIME + (cm.tsMs / 1000L))
   if (cm.origText.isNotEmpty()) lines.add(cm.origText)
-  val src = zfFileOf(cm.ci)
-  val mc = zfMakeContent(if (src != null) cm.ci.content.msgContent else null, lines.joinToString("\n"))
+  val src = zfFileOf(cm.origCi)
+  val mc = zfMakeContent(if (src != null) cm.origCi.content.msgContent else null, lines.joinToString("\n"))
   val ok = zfSendOne(c, mc, src)
   if (ok && cm.edited) {
     delay(150)
-    zfSendOne(c, MsgContent.MCText(ZF_EDIT + p.pid + "\n" + ZF_META_REPLY + cm.cid + (if (cm.text.isNotEmpty()) "\n" + cm.text else "")), null)
+    zfSendEditCopy(c, p.pid, cm.cid, cm.text, cm.origCi, cm.mediaCi)
   }
   return ok
 }
@@ -1642,10 +1722,11 @@ private fun ZfRoundButton(label: String, size: Dp, fontSize: Int, onClick: () ->
 }
 
 @Composable
-private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, maxWidth: Dp) {
+private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, maxWidth: Dp, autoPlay: Boolean) {
   var uri by remember(file.fileId) { mutableStateOf<URI?>(null) }
   var failed by remember(file.fileId) { mutableStateOf(false) }
-  LaunchedEffect(file.fileId) {
+  var tryN by remember(file.fileId) { mutableStateOf(0) }
+  LaunchedEffect(file.fileId, tryN) {
     val src = getLoadedFileSource(file)
     val res = withContext(Dispatchers.IO) {
       try {
@@ -1666,14 +1747,30 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
   val width = minOf(LocalWindowWidth() - 48.dp, maxWidth)
   val u = uri
   if (u == null) {
-    Box(Modifier.width(width)) {
-      Image(preview, null, Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.FillWidth)
-      Text(
-        if (failed) "No se pudo abrir el video" else "Preparando video…",
-        Modifier.align(Alignment.Center),
-        color = Color.White,
-        fontSize = 13.sp
-      )
+    Box(Modifier.width(width).clip(RoundedCornerShape(10.dp)).clickable(enabled = failed) {
+      failed = false
+      tryN = tryN + 1
+    }) {
+      Image(preview, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
+      Row(
+        Modifier
+          .align(Alignment.Center)
+          .clip(RoundedCornerShape(20.dp))
+          .background(Color.Black.copy(alpha = 0.6f))
+          .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        if (!failed) {
+          CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+          Spacer(Modifier.width(8.dp))
+        }
+        Text(
+          if (failed) "No se pudo abrir el video · toca para reintentar" else "Preparando video…",
+          color = Color.White,
+          fontSize = 13.sp,
+          fontWeight = FontWeight.Bold
+        )
+      }
     }
     return
   }
@@ -1693,6 +1790,14 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
     player.stop()
   }
   val toggle: () -> Unit = { if (playing.value) stop() else play() }
+  // el video que acaba de descargarse por un toque empieza solo
+  LaunchedEffect(u) {
+    if (autoPlay) {
+      delay(300)
+      play()
+      controlsVisible = true
+    }
+  }
   val skip: (Long) -> Unit = { delta ->
     val total = if (duration.value > 0L) duration.value else durationMs
     val target = (progress.value + delta).coerceIn(0L, if (total > 0L) total else Long.MAX_VALUE)
@@ -1769,6 +1874,106 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Descarga de archivos del feed (imagen, video y audio).
+// Al tocar se pide el archivo, se muestra «Descargando…» con rueda y, en cuanto está completo en el teléfono,
+// aparece el reproductor (y empieza solo si la descarga la pidió ese toque). No hay límite corto de espera:
+// se sigue comprobando mientras la publicación esté en pantalla, y si tarda se puede reintentar con otro toque.
+// ---------------------------------------------------------------------------
+private val zfDlStarted = ConcurrentHashMap<String, Long>()
+private const val ZF_DL_SLOW_MS = 45_000L
+private const val ZF_DL_GIVEUP_MS = 20L * 60L * 1000L
+
+private fun zfDlKey(rh: Long?, file: CIFile): String = (rh ?: -1L).toString() + ":" + file.fileId
+
+private fun zfSizeText(bytes: Long): String {
+  if (bytes <= 0L) return ""
+  val mb = bytes.toDouble() / 1048576.0
+  return if (mb >= 1.0) (Math.round(mb * 10.0) / 10.0).toString() + " MB" else Math.max(1L, bytes / 1024L).toString() + " KB"
+}
+
+private class ZfDlState(val rh: Long?, val file: CIFile?) {
+  var downloading by mutableStateOf(false)
+  var slow by mutableStateOf(false)
+  var byUser by mutableStateOf(false)
+
+  /** Pide el archivo (también sirve para reintentar). */
+  fun request() {
+    val f = file ?: return
+    byUser = true
+    downloading = true
+    slow = false
+    zfDlStarted[zfDlKey(rh, f)] = System.currentTimeMillis()
+    withLongRunningApi {
+      try {
+        val u = chatModel.currentUser.value
+        if (u != null) {
+          chatModel.controller.receiveFiles(rh, u, listOf(f.fileId), userApprovedRelays = false, auto = false)
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "zetaria feed download: " + e.stackTraceToString())
+      }
+    }
+  }
+}
+
+/** Espera a que el archivo esté completo en el teléfono. Se cancela solo al salir de la pantalla. */
+private suspend fun zfWaitFile(st: ZfDlState, check: suspend (CIFile) -> Boolean): CIFile? {
+  val file = st.file ?: return null
+  val probe = if (file.fileStatus.sent) file else file.copy(fileStatus = CIFileStatus.RcvComplete)
+  val key = zfDlKey(st.rh, file)
+  val inProgress = file.fileStatus is CIFileStatus.RcvAccepted || file.fileStatus is CIFileStatus.RcvTransfer
+  var waited = 0L
+  while (true) {
+    val ok = withContext(Dispatchers.IO) {
+      try {
+        check(probe)
+      } catch (e: Exception) {
+        false
+      }
+    }
+    if (ok) {
+      zfDlStarted.remove(key)
+      st.downloading = false
+      st.slow = false
+      return probe
+    }
+    val now = System.currentTimeMillis()
+    val startedAt = zfDlStarted[key]
+    if (startedAt != null && now - startedAt > ZF_DL_GIVEUP_MS) zfDlStarted.remove(key)
+    val active = zfDlStarted[key]
+    st.downloading = active != null || inProgress
+    st.slow = (active != null && now - active > ZF_DL_SLOW_MS) || (active == null && inProgress && waited > ZF_DL_SLOW_MS)
+    val step = if (!st.downloading) 3000L else if (waited < 10_000L) 700L else if (waited < 120_000L) 1500L else 4000L
+    delay(step)
+    waited += step
+  }
+}
+
+private fun zfDlText(st: ZfDlState, what: String): String {
+  val size = st.file?.fileSize ?: 0L
+  return if (st.slow) "Tarda mucho · toca para reintentar"
+  else if (st.downloading) "Descargando " + what + "…"
+  else "⬇ Descargar " + what + (if (size > 0L) " (" + zfSizeText(size) + ")" else "")
+}
+
+@Composable
+private fun ZfDlBadge(st: ZfDlState, what: String, modifier: Modifier) {
+  Row(
+    modifier
+      .clip(RoundedCornerShape(20.dp))
+      .background(Color.Black.copy(alpha = 0.6f))
+      .padding(horizontal = 14.dp, vertical = 8.dp),
+    verticalAlignment = Alignment.CenterVertically
+  ) {
+    if (st.downloading && !st.slow) {
+      CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+      Spacer(Modifier.width(8.dp))
+    }
+    Text(zfDlText(st, what), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color.White)
+  }
+}
+
 @Composable
 private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
   val mc = ci.content.msgContent
@@ -1784,9 +1989,9 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
   }
   val durationSec = (mc as? MsgContent.MCVideo)?.duration ?: 0
   val file = ci.file
+  val st = remember(ci.id) { ZfDlState(rh, file) }
   var full by remember(ci.id) { mutableStateOf<ImageBitmap?>(null) }
   var loadedFile by remember(ci.id) { mutableStateOf<CIFile?>(null) }
-  var attempt by remember(ci.id) { mutableStateOf(0) }
   val previewBmp = remember(previewStr) {
     try {
       base64ToBitmap(previewStr)
@@ -1795,44 +2000,32 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
     }
   }
 
-  // Se vuelve a comprobar el disco cada pocos segundos: el archivo puede terminar de descargarse con el feed abierto
-  LaunchedEffect(ci.id, attempt) {
-    if (file == null || loadedFile != null) return@LaunchedEffect
-    var tries = 0
-    while (tries < 40) {
-      val probe = if (file.fileStatus.sent) file else file.copy(fileStatus = CIFileStatus.RcvComplete)
-      var bmp: ImageBitmap? = null
-      var ready = false
-      withContext(Dispatchers.IO) {
-        try {
-          if (isVideo) {
-            ready = getLoadedFilePath(probe) != null
-          } else {
-            bmp = getLoadedImage(probe)?.first
-            ready = bmp != null
-          }
-        } catch (e: Exception) {
-          ready = false
-        }
+  // El archivo puede terminar de descargarse con el feed abierto: se comprueba el disco hasta que esté
+  LaunchedEffect(ci.id) {
+    if (file == null) return@LaunchedEffect
+    var bmp: ImageBitmap? = null
+    val lf = zfWaitFile(st) { probe ->
+      if (isVideo) {
+        getLoadedFilePath(probe) != null
+      } else {
+        bmp = getLoadedImage(probe)?.first
+        bmp != null
       }
-      if (ready) {
-        full = bmp
-        loadedFile = probe
-        break
-      }
-      tries++
-      delay(2000)
+    }
+    if (lf != null) {
+      full = bmp
+      loadedFile = lf
     }
   }
 
   val shown = full ?: previewBmp
   if (shown != null) {
     val lf = loadedFile
-    val waiting = lf == null && file != null && file.fileStatus is CIFileStatus.RcvInvitation
     Spacer(Modifier.height(8.dp))
     if (isVideo && lf != null && previewBmp != null) {
-      ZfVideoPlayer(lf, previewBmp, durationSec * 1000L, if (compact) 220.dp else 360.dp)
+      ZfVideoPlayer(lf, previewBmp, durationSec * 1000L, if (compact) 220.dp else 360.dp, st.byUser)
     } else {
+      val canTap = lf == null && file != null && (!st.downloading || st.slow)
       Box(Modifier.fillMaxWidth()) {
         Image(
           shown,
@@ -1841,27 +2034,11 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
             .fillMaxWidth()
             .heightIn(max = if (compact) 240.dp else 420.dp)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(enabled = waiting) {
-              val u = chatModel.currentUser.value
-              if (u != null && file != null) {
-                withLongRunningApi {
-                  chatModel.controller.receiveFiles(rh, u, listOf(file.fileId), userApprovedRelays = false, auto = false)
-                  withContext(Dispatchers.Main) { attempt = attempt + 1 }
-                }
-              }
-            },
+            .clickable(enabled = canTap) { st.request() },
           contentScale = ContentScale.Fit
         )
-        if (waiting) {
-          Text(
-            if (isVideo) "⬇ Toca para descargar el video" else "Toca para descargar",
-            Modifier.align(Alignment.Center),
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colors.primary
-          )
-        } else if (lf == null && file != null && !file.fileStatus.sent) {
-          Text("Descargando…", Modifier.align(Alignment.Center), fontSize = 13.sp, color = MaterialTheme.colors.primary)
+        if (lf == null && file != null) {
+          ZfDlBadge(st, if (isVideo) "video" else "imagen", Modifier.align(Alignment.Center))
         }
         if (isVideo && durationSec > 0) {
           Text(
@@ -1891,7 +2068,7 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
 // Audio (MP3 y otros) con reproductor propio
 // ---------------------------------------------------------------------------
 @Composable
-private fun ZfAudioPlayer(file: CIFile, title: String) {
+private fun ZfAudioPlayer(file: CIFile, title: String, autoPlay: Boolean) {
   val src = remember(file.fileId) { getLoadedFileSource(file) }
   val playing = remember(file.fileId) { mutableStateOf(false) }
   val progress = remember(file.fileId) { mutableStateOf(0) }
@@ -1900,17 +2077,11 @@ private fun ZfAudioPlayer(file: CIFile, title: String) {
   var dragValue by remember(file.fileId) { mutableStateOf<Float?>(null) }
   val secondary = MaterialTheme.colors.secondary
   val onBg = MaterialTheme.colors.onBackground
-  // la duración de un archivo sin cifrar se conoce de antes; si no, se sabe al empezar a reproducir
+  // la duración se lee aparte (también de archivos cifrados), así la barra funciona antes de darle a reproducir
   LaunchedEffect(file.fileId) {
-    if (src != null && src.cryptoArgs == null) {
-      val d = withContext(Dispatchers.IO) {
-        try {
-          AudioPlayer.duration(getAppFilePath(src.filePath))
-        } catch (e: Exception) {
-          null
-        }
-      }
-      if (d != null) duration.value = d
+    if (src != null) {
+      val d = zetariaAudioDuration(src)
+      if (d != null && duration.value == 0) duration.value = d
     }
   }
   DisposableEffect(file.fileId) {
@@ -1920,11 +2091,23 @@ private fun ZfAudioPlayer(file: CIFile, title: String) {
   }
   val play: () -> Unit = {
     if (src != null) {
-      AudioPlayer.play(src, playing, progress, duration, true, false)
-      broken = !playing.value
+      try {
+        AudioPlayer.play(src, playing, progress, duration, true, false)
+        broken = !playing.value
+      } catch (e: Exception) {
+        Log.e(TAG, "zetaria feed audio play: " + e.stackTraceToString())
+        broken = true
+      }
     }
   }
   val pause: () -> Unit = { AudioPlayer.pause(playing, progress) }
+  // el audio que acaba de descargarse por un toque suena solo
+  LaunchedEffect(file.fileId) {
+    if (autoPlay && src != null) {
+      delay(300)
+      if (!playing.value) play()
+    }
+  }
   val total = duration.value
   Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(secondary.copy(alpha = 0.12f)).padding(10.dp)) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1952,7 +2135,7 @@ private fun ZfAudioPlayer(file: CIFile, title: String) {
       Text(zfClock(total.toLong()), fontSize = 11.sp, color = secondary)
     }
     if (broken) {
-      Text("No se pudo reproducir el audio", fontSize = 12.sp, color = MaterialTheme.colors.error)
+      Text("No se pudo reproducir el audio · toca ▶ para reintentar", fontSize = 12.sp, color = MaterialTheme.colors.error)
     }
   }
 }
@@ -1960,60 +2143,35 @@ private fun ZfAudioPlayer(file: CIFile, title: String) {
 @Composable
 private fun ZfAudio(ci: ChatItem, rh: Long?) {
   val file = ci.file ?: return
+  val st = remember(ci.id) { ZfDlState(rh, file) }
   var loadedFile by remember(ci.id) { mutableStateOf<CIFile?>(null) }
-  var attempt by remember(ci.id) { mutableStateOf(0) }
-  LaunchedEffect(ci.id, attempt) {
-    if (loadedFile != null) return@LaunchedEffect
-    var tries = 0
-    while (tries < 40) {
-      val probe = if (file.fileStatus.sent) file else file.copy(fileStatus = CIFileStatus.RcvComplete)
-      val ready = withContext(Dispatchers.IO) {
-        try {
-          getLoadedFilePath(probe) != null
-        } catch (e: Exception) {
-          false
-        }
-      }
-      if (ready) {
-        loadedFile = probe
-        break
-      }
-      tries++
-      delay(2000)
-    }
+  LaunchedEffect(ci.id) {
+    loadedFile = zfWaitFile(st) { probe -> getLoadedFilePath(probe) != null }
   }
   val lf = loadedFile
   Spacer(Modifier.height(8.dp))
   if (lf != null) {
-    ZfAudioPlayer(lf, file.fileName)
+    ZfAudioPlayer(lf, file.fileName, st.byUser)
   } else {
-    val waiting = file.fileStatus is CIFileStatus.RcvInvitation
+    val canTap = !st.downloading || st.slow
     Row(
       Modifier
         .fillMaxWidth()
         .clip(RoundedCornerShape(12.dp))
         .background(MaterialTheme.colors.secondary.copy(alpha = 0.12f))
-        .clickable(enabled = waiting) {
-          val u = chatModel.currentUser.value
-          if (u != null) {
-            withLongRunningApi {
-              chatModel.controller.receiveFiles(rh, u, listOf(file.fileId), userApprovedRelays = false, auto = false)
-              withContext(Dispatchers.Main) { attempt = attempt + 1 }
-            }
-          }
-        }
+        .clickable(enabled = canTap) { st.request() }
         .padding(12.dp),
       verticalAlignment = Alignment.CenterVertically
     ) {
-      Text("🎵", fontSize = 24.sp)
+      if (st.downloading && !st.slow) {
+        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+      } else {
+        Text("🎵", fontSize = 24.sp)
+      }
       Spacer(Modifier.width(10.dp))
       Column(Modifier.weight(1f)) {
         Text(file.fileName, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colors.onBackground)
-        Text(
-          if (waiting) "⬇ Toca para descargar el audio" else "Descargando…",
-          fontSize = 12.sp,
-          color = MaterialTheme.colors.primary
-        )
+        Text(zfDlText(st, "audio"), fontSize = 12.sp, color = MaterialTheme.colors.primary)
       }
     }
   }
@@ -2348,7 +2506,10 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
       if (c.text.isNotEmpty()) {
         Text(c.text, fontSize = 14.sp, color = onBg)
       }
-      ZfMedia(c.ci, c.rh, true)
+      val mci = c.mediaCi
+      if (mci != null) ZfMedia(mci, c.rh, true)
+      // las reacciones van en su propia línea y las acciones no se parten aunque falte espacio
+      ZfReactionSummary(c.counts, true) { showReactors = true }
       Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         val mr = c.myReaction
         Text(
@@ -2356,35 +2517,27 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
           fontSize = 12.sp,
           fontWeight = FontWeight.SemiBold,
           color = if (mr != null) primary else secondary,
-          modifier = Modifier.clickable { trayOpen = !trayOpen }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
+          maxLines = 1,
+          softWrap = false,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.weight(1f, fill = false).clickable { trayOpen = !trayOpen }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
         )
         Text(
           "Responder",
           fontSize = 12.sp,
           fontWeight = FontWeight.SemiBold,
           color = secondary,
-          modifier = Modifier.clickable { onReply() }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
+          maxLines = 1,
+          softWrap = false,
+          modifier = Modifier.clickable { onReply() }.padding(top = 6.dp, bottom = 6.dp, end = 10.dp)
         )
+        Spacer(Modifier.weight(1f))
         if (c.mine) {
-          Text(
-            "✏️ Editar",
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = secondary,
-            modifier = Modifier.clickable { showEdit = true }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
-          )
+          Text("✏️", fontSize = 16.sp, maxLines = 1, softWrap = false, modifier = Modifier.clickable { showEdit = true }.padding(horizontal = 8.dp, vertical = 6.dp))
         }
         if (onDelete != null) {
-          Text(
-            "Eliminar",
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colors.error,
-            modifier = Modifier.clickable { onDelete() }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
-          )
+          Text("🗑", fontSize = 16.sp, maxLines = 1, softWrap = false, modifier = Modifier.clickable { onDelete() }.padding(horizontal = 8.dp, vertical = 6.dp))
         }
-        Spacer(Modifier.weight(1f))
-        ZfReactionSummary(c.counts, true) { showReactors = true }
       }
       if (trayOpen) {
         ZfEmojiTray(c.myReaction, true) { em ->
@@ -2407,15 +2560,18 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
   if (showEdit) {
     ZfEditDialog(
       title = "Editar comentario",
-      original = c.origText,
-      current = c.text,
+      origText = c.origText,
+      origCi = c.origCi,
+      curText = c.text,
+      curCi = c.mediaCi,
       maxLen = ZF_MAX_COMMENT,
-      onSave = { nt -> zfEditComment(p, c, nt) },
+      allowAudio = false,
+      onSave = { inp -> zfEditComment(p, c, inp) },
       onDismiss = { showEdit = false }
     )
   }
   if (showOriginal) {
-    ZfOriginalDialog("Comentario editado", c.origText, c.text) { showOriginal = false }
+    ZfOriginalDialog("Comentario editado", c.origText, c.origCi, c.text, c.mediaCi) { showOriginal = false }
   }
 }
 
@@ -2570,26 +2726,71 @@ private fun ZfQuote(label: String, text: String) {
   }
 }
 
-/** Ventana para editar: muestra arriba el original (antes de editar) y debajo el campo para cambiarlo. */
+/** Miniatura fija (sin reproductor) del archivo de un mensaje: imagen, video o audio. */
+@Composable
+private fun ZfStaticMedia(ci: ChatItem?) {
+  val mc = ci?.content?.msgContent
+  val prev: String? = when (mc) {
+    is MsgContent.MCImage -> mc.image
+    is MsgContent.MCVideo -> mc.image
+    else -> null
+  }
+  if (prev != null) {
+    val bmp = remember(prev) {
+      try {
+        base64ToBitmap(prev)
+      } catch (e: Exception) {
+        null
+      }
+    }
+    if (bmp != null) {
+      Spacer(Modifier.height(6.dp))
+      Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Image(bmp, null, Modifier.fillMaxWidth().heightIn(max = 180.dp).clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.Fit)
+        if (mc is MsgContent.MCVideo) {
+          Text("▶", fontSize = 34.sp, color = Color.White)
+        }
+      }
+    }
+  } else if (mc is MsgContent.MCFile) {
+    Spacer(Modifier.height(6.dp))
+    Text("🎵 " + (ci?.file?.fileName ?: "audio"), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colors.onBackground)
+  }
+}
+
+/**
+ * Ventana para editar: muestra arriba el original (texto y archivo, antes de editar) y debajo el campo para cambiar
+ * el texto y el archivo (cambiarlo por otro o quitarlo).
+ */
 @Composable
 private fun ZfEditDialog(
   title: String,
-  original: String,
-  current: String,
+  origText: String,
+  origCi: ChatItem,
+  curText: String,
+  curCi: ChatItem?,
   maxLen: Int,
-  onSave: suspend (String) -> String?,
+  allowAudio: Boolean,
+  onSave: suspend (ZfEditInput) -> String?,
   onDismiss: () -> Unit
 ) {
-  var text by remember { mutableStateOf(current) }
+  var text by remember { mutableStateOf(curText) }
   var busy by remember { mutableStateOf(false) }
   var error by remember { mutableStateOf<String?>(null) }
+  var remove by remember { mutableStateOf(false) }
+  val picked = remember { ZfPicked() }
+  val pickers = rememberZfPickers(picked)
   val secondary = MaterialTheme.colors.secondary
+  val primary = MaterialTheme.colors.primary
+  val hasCur = zfHasMedia(curCi)
+  val curDiffers = hasCur && curCi != null && curCi.id != origCi.id
   Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
     Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
       Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
-        ZfQuote("Original (antes de editar)", original)
+        ZfQuote("Original (antes de editar)", origText)
+        ZfStaticMedia(origCi)
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
           text,
@@ -2599,6 +2800,39 @@ private fun ZfEditDialog(
           maxLines = 8,
           enabled = !busy
         )
+        Spacer(Modifier.height(8.dp))
+        if (picked.uri != null || picked.audio) {
+          Text("Archivo nuevo (reemplaza al anterior):", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = secondary)
+          ZfPickedView(picked, 200.dp, !busy, pickers, allowAudio)
+        } else if (remove) {
+          Text("Se quitará el archivo adjunto.", fontSize = 13.sp, color = MaterialTheme.colors.error)
+          Text(
+            "↩ Deshacer",
+            color = primary,
+            fontSize = 13.sp,
+            modifier = Modifier.clickable(enabled = !busy) { remove = false }.padding(vertical = 8.dp)
+          )
+        } else {
+          if (curDiffers) {
+            Text("Archivo actual:", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = secondary)
+            ZfStaticMedia(curCi)
+            Spacer(Modifier.height(6.dp))
+          }
+          Text(
+            if (hasCur) "Cambiar el archivo por otro (si no eliges nada, se queda el actual):" else "Añadir un archivo:",
+            fontSize = 12.sp,
+            color = secondary
+          )
+          ZfPickedView(picked, 200.dp, !busy, pickers, allowAudio)
+          if (hasCur) {
+            Text(
+              "🗑 Quitar el archivo actual",
+              color = MaterialTheme.colors.error,
+              fontSize = 13.sp,
+              modifier = Modifier.clickable(enabled = !busy) { remove = true }.padding(vertical = 8.dp)
+            )
+          }
+        }
         Text("Se verá «editado» y quien quiera podrá ver el original.", fontSize = 12.sp, color = secondary, modifier = Modifier.padding(top = 4.dp))
         val err = error
         if (err != null) {
@@ -2611,13 +2845,13 @@ private fun ZfEditDialog(
           TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancelar") }
           TextButton(
             onClick = {
-              val nt = text
+              val inp = ZfEditInput(text, picked.uri, picked.video, picked.audio, remove)
               busy = true
               error = null
               withLongRunningApi {
                 var res: String? = "No se pudo guardar la edición."
                 try {
-                  res = onSave(nt)
+                  res = onSave(inp)
                 } catch (e: Exception) {
                   Log.e(TAG, "zetaria feed edit: " + e.stackTraceToString())
                 } finally {
@@ -2628,7 +2862,7 @@ private fun ZfEditDialog(
                 }
               }
             },
-            enabled = !busy && text.trim() != current.trim()
+            enabled = !busy && (text.trim() != curText.trim() || picked.uri != null || remove)
           ) { Text("Guardar") }
         }
       }
@@ -2636,17 +2870,23 @@ private fun ZfEditDialog(
   }
 }
 
-/** Ventana que muestra la versión original de algo ya editado, junto a la versión actual. */
+/** Ventana que muestra la versión original (texto y archivo) de algo ya editado, junto a la versión actual. */
 @Composable
-private fun ZfOriginalDialog(title: String, original: String, current: String, onDismiss: () -> Unit) {
+private fun ZfOriginalDialog(title: String, origText: String, origCi: ChatItem, curText: String, curCi: ChatItem?, onDismiss: () -> Unit) {
   Dialog(onDismissRequest = onDismiss) {
     Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
       Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
-        ZfQuote("Original", original)
+        ZfQuote("Original", origText)
+        ZfStaticMedia(origCi)
         Spacer(Modifier.height(12.dp))
-        ZfQuote("Versión actual (editada)", current)
+        ZfQuote("Versión actual (editada)", curText)
+        if (zfHasMedia(curCi)) {
+          ZfStaticMedia(curCi)
+        } else if (zfHasMedia(origCi)) {
+          Text("(se quitó el archivo adjunto)", fontSize = 12.sp, color = MaterialTheme.colors.secondary, modifier = Modifier.padding(top = 6.dp))
+        }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
           TextButton(onClick = onDismiss) { Text("Cerrar") }
         }
@@ -2671,6 +2911,7 @@ private fun ZfShareDialog(p: ZfPost, onDismiss: () -> Unit) {
         Text("Compartir publicación", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
         ZfQuote(p.authorName, if (p.text.isEmpty()) "(publicación con archivo adjunto)" else p.text.take(300))
+        ZfStaticMedia(p.mediaCi)
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
           note,
@@ -2728,7 +2969,17 @@ private fun ZfShareDialog(p: ZfPost, onDismiss: () -> Unit) {
               if (note.isNotBlank()) sb.append(note.trim()).append("\n\n")
               sb.append(p.authorName).append(":")
               if (p.text.isNotEmpty()) sb.append("\n").append(p.text)
-              clipboard.shareText(sb.toString())
+              val mci = p.mediaCi
+              val src = if (mci != null && zfHasMedia(mci)) zfFileOf(mci) else null
+              if (src != null) {
+                // imagen, video o audio con el texto como pie
+                val mc = mci?.content?.msgContent
+                val kind = if (mc is MsgContent.MCImage) 1 else if (mc is MsgContent.MCVideo) 2 else 3
+                zetariaShareFile(sb.toString(), src, kind)
+              } else {
+                if (zfHasMedia(mci)) showToast("Descarga primero el archivo para poder compartirlo; se envía solo el texto.")
+                clipboard.shareText(sb.toString())
+              }
               onDismiss()
             }
             .padding(vertical = 12.dp)
@@ -2846,7 +3097,9 @@ private fun ZfPostCard(p: ZfPost) {
       }
       Text("📤", fontSize = 18.sp, modifier = Modifier.clickable { showShare = true }.padding(8.dp))
       if (p.mine) {
-        Text("✏️", fontSize = 18.sp, modifier = Modifier.clickable { showEdit = true }.padding(8.dp))
+        if (p.options.isEmpty()) {
+          Text("✏️", fontSize = 18.sp, modifier = Modifier.clickable { showEdit = true }.padding(8.dp))
+        }
         Text("🗑", fontSize = 18.sp, modifier = Modifier.clickable { showDelete = true }.padding(8.dp))
       }
     }
@@ -2857,7 +3110,8 @@ private fun ZfPostCard(p: ZfPost) {
     if (p.options.isNotEmpty()) {
       ZfPoll(p) { showVoters = true }
     }
-    ZfMedia(p.ci, p.rh, false)
+    val pmedia = p.mediaCi
+    if (pmedia != null) ZfMedia(pmedia, p.rh, false)
     // resumen: reacciones a la izquierda, comentarios a la derecha
     if (p.reactors.isNotEmpty() || p.comments.isNotEmpty()) {
       Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2930,10 +3184,13 @@ private fun ZfPostCard(p: ZfPost) {
   if (showEdit) {
     ZfEditDialog(
       title = "Editar publicación",
-      original = p.origText,
-      current = p.text,
+      origText = p.origText,
+      origCi = p.origCi,
+      curText = p.text,
+      curCi = p.mediaCi,
       maxLen = ZF_MAX_TEXT,
-      onSave = { nt -> zfEditPost(p, nt) },
+      allowAudio = true,
+      onSave = { inp -> zfEditPost(p, inp) },
       onDismiss = { showEdit = false }
     )
   }
@@ -2941,7 +3198,7 @@ private fun ZfPostCard(p: ZfPost) {
     ZfShareDialog(p) { showShare = false }
   }
   if (showOriginal) {
-    ZfOriginalDialog("Publicación editada", p.origText, p.text) { showOriginal = false }
+    ZfOriginalDialog("Publicación editada", p.origText, p.origCi, p.text, p.mediaCi) { showOriginal = false }
   }
   if (showVoters) {
     ZfVotersDialog(p) { showVoters = false }
