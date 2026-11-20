@@ -12,8 +12,10 @@
 - Comentarios con foto de perfil, respuestas a comentarios, e imágenes o videos adjuntos; se ve quién reaccionó.
 - A un contacto nuevo se le reenvían tus publicaciones anteriores (con sus comentarios y reacciones); las
   primeras 20 solas, y el botón «Actualizar» del Feed envía todas las que le falten (sin tope).
-- Editar publicaciones y comentarios propios (lápiz): se ve «editado» y se puede abrir el original.
-- Compartir una publicación (📤): en tu propio Feed o hacia otra app del teléfono.
+- Editar publicaciones y comentarios propios (lápiz): texto y también imagen, video o audio (cambiar o quitar;
+  las encuestas no se editan). Se ve «editado» y se puede abrir el original.
+- Compartir una publicación (📤): en tu propio Feed o hacia otra app del teléfono, con su imagen, video o audio.
+- Descarga de videos y audios en el Feed con indicador, reintento y reproducción automática al terminar.
 - Aviso (globito con número) en la pestaña «Feed» cuando hay publicaciones nuevas.
 - Reacciones (👍 ❤️ 😂 😮 😢 😡, y «＋» para cualquier otro emoji) y comentarios, visibles para todos los que recibieron la publicación
   (el autor reenvía lo que recibe al resto de sus contactos).
