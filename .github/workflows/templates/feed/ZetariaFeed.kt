@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -37,6 +38,8 @@ import chat.simplex.common.platform.openFile
 import chat.simplex.common.platform.rememberFileChooserLauncher
 import chat.simplex.common.platform.resizeImageToStrSize
 import chat.simplex.common.platform.settings
+import chat.simplex.common.platform.shareText
+import chat.simplex.common.platform.showToast
 import chat.simplex.common.views.chat.topPaddingToContent
 import chat.simplex.common.views.helpers.*
 import kotlinx.coroutines.*
@@ -57,6 +60,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 //   Reacción reenviada   "💠 ζ·<pid> <clave> <emoji> <nombre>"         autor -> demás contactos
 //   Eliminar publicación "🗑 ζ·<pid>"                                  autor -> todos sus contactos
 //   Eliminar comentario  "🗑 ζ·<pid>" + "↪ <cid>"                       quien comentó -> autor -> demás contactos
+//   Editar publicación   "✏ ζ·<pid>" + texto nuevo                      autor -> todos sus contactos
+//   Editar comentario    "✏ ζ·<pid>" + "↪ <cid>" + texto nuevo          quien comentó -> autor -> demás contactos
 //
 // Después de la primera línea pueden venir líneas de datos opcionales:
 //   "↪ <cid>"       responde a ese comentario (o, en una reacción, reacciona a ese comentario)
@@ -77,6 +82,7 @@ private const val ZF_CREL = "🗨 ζ·"
 private const val ZF_REACT = "💟 ζ·"
 private const val ZF_RREL = "💠 ζ·"
 private const val ZF_DEL = "🗑 ζ·"
+private const val ZF_EDIT = "✏ ζ·"
 private const val ZF_META_REPLY = "↪ "
 private const val ZF_META_AVATAR = "🪪 "
 private const val ZF_META_TIME = "🕒 "
@@ -86,10 +92,11 @@ private const val ZF_MAX_COMMENT = 1000
 private const val ZF_MAX_VIDEO_BYTES = 60L * 1024L * 1024L
 private const val ZF_MAX_AUDIO_BYTES = 25L * 1024L * 1024L
 private const val ZF_MAX_OPTIONS = 6
+private const val ZF_MAX_EMOJI_LEN = 16
 private const val ZF_BACKFILL_POSTS = 20
 private const val ZF_BACKFILL_ITEMS = 40
 private const val ZF_AUTOSAVE_KEY = "zetaria_auto_save_images"
-private val ZF_EMOJIS = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+private val ZF_EMOJIS = listOf("👍", "❤️", "😂", "😮", "😢", "😡")
 
 /** Guarda una imagen o un video recibido en la galería, dentro de la carpeta «Zetaria». */
 expect suspend fun zetariaSaveToGallery(file: CIFile?, video: Boolean, feed: Boolean, quiet: Boolean)
@@ -111,7 +118,7 @@ fun zetariaSaveChatImageManual(ciFile: CIFile?) {
 /** Mueve la reproducción de un video a una posición (milisegundos). */
 expect fun zetariaVideoSeek(player: VideoPlayer, positionMs: Long)
 
-private enum class ZfKind { POST, COMMENT, CREL, REACT, RREL, DEL }
+private enum class ZfKind { POST, COMMENT, CREL, REACT, RREL, DEL, EDIT }
 
 private class ZfHead(
   val kind: ZfKind,
@@ -132,7 +139,18 @@ private val zfCidRe = Regex("^[0-9a-f]{8}$")
 private val zfKeyRe = Regex("^[A-Za-z0-9]{1,24}$")
 private val zfVoteRe = Regex("^#[0-6]$")
 
-private fun zfValidEmoji(s: String): Boolean = s == "-" || ZF_EMOJIS.contains(s) || zfVoteRe.matches(s)
+/**
+ * Un emoji personalizado: sin espacios, de pocos caracteres, con algún símbolo no ASCII y sin letras ni
+ * números ASCII (así no se cuelan textos normales ni "#1".."#6", que son votos de encuestas).
+ */
+private fun zfIsCustomEmoji(s: String): Boolean {
+  if (s.isEmpty() || s.length > ZF_MAX_EMOJI_LEN) return false
+  if (s.any { it.isWhitespace() || it.isISOControl() }) return false
+  if (s.any { it.code < 128 }) return false
+  return true
+}
+
+private fun zfValidEmoji(s: String): Boolean = s == "-" || zfVoteRe.matches(s) || ZF_EMOJIS.contains(s) || zfIsCustomEmoji(s)
 
 private fun zfParseText(text: String): ZfHead? {
   if (!text.contains(ZF_TOK)) return null
@@ -194,6 +212,11 @@ private fun zfParseText(text: String): ZfHead? {
     val pid = head.substring(ZF_DEL.length).trim()
     if (!zfPidRe.matches(pid)) return null
     return ZfHead(ZfKind.DEL, pid, "", "", "", "", "", reply, "", 0L, emptyList())
+  }
+  if (head.startsWith(ZF_EDIT)) {
+    val pid = head.substring(ZF_EDIT.length).trim()
+    if (!zfPidRe.matches(pid)) return null
+    return ZfHead(ZfKind.EDIT, pid, "", "", "", "", body, reply, "", 0L, emptyList())
   }
   return null
 }
@@ -262,6 +285,7 @@ private val zfEvents = HashMap<String, HashMap<Long, ZfEvent>>()
 private var zfUserId: Long = -1L
 private val zfVersion = mutableStateOf(0)
 private val zfLoading = mutableStateOf(false)
+private val zfSending = mutableStateOf(false)
 private val zfRefreshing = AtomicBoolean(false)
 private val zfInitialDone = AtomicBoolean(false)
 private val zfSeen = mutableStateOf(0L)
@@ -404,7 +428,7 @@ private class ZfComment(
   val key: String,
   val name: String,
   val avatar: String?,
-  val text: String,
+  var text: String,
   val reply: String,
   val tsMs: Long,
   val tsText: String,
@@ -412,6 +436,8 @@ private class ZfComment(
   val ci: ChatItem,
   val rh: Long?
 ) {
+  val origText: String = text
+  var edited: Boolean = false
   var counts: Map<String, Int> = emptyMap()
   var myReaction: String? = null
   var reactors: List<ZfReactor> = emptyList()
@@ -429,6 +455,8 @@ private class ZfPost(
   val rh: Long?,
   val chatId: String,
   val text: String,
+  val origText: String,
+  val edited: Boolean,
   val tsMs: Long,
   val comments: List<ZfComment>,
   val counts: Map<String, Int>,
@@ -451,6 +479,7 @@ private class ZfAcc(val key: String, var ev: ZfEvent, val mine: Boolean) {
   val votes = HashMap<String, ZfReact>()                      // quien -> voto de la encuesta ("#1".."#6", "#0" = retirado)
   val deletedComments = HashSet<String>()
   val chats = HashSet<String>()
+  var editText: String? = null                                // texto vigente tras editar la publicación
 }
 
 private fun zfAddComment(a: ZfAcc, e: ZfEvent, key: String, name: String, avatar: String?, mine: Boolean) {
@@ -503,6 +532,7 @@ private fun zfBuildPosts(): List<ZfPost> {
   val deletedMine = HashSet<String>()      // pid de publicaciones mías eliminadas
   val deletedTheirs = HashSet<String>()    // "pid|chat" de publicaciones eliminadas por su autor
   val delComments = ArrayList<ZfEvent>()   // eliminaciones de comentarios
+  val edits = ArrayList<ZfEvent>()         // ediciones de publicaciones y comentarios
   for (e in all) {
     if (e.kind == ZfKind.DEL) {
       if (e.reply.isNotEmpty()) {
@@ -512,6 +542,8 @@ private fun zfBuildPosts(): List<ZfPost> {
       } else {
         deletedTheirs.add(e.pid + "|" + e.chatId)
       }
+    } else if (e.kind == ZfKind.EDIT) {
+      edits.add(e)
     }
   }
   for (e in all) {
@@ -529,6 +561,7 @@ private fun zfBuildPosts(): List<ZfPost> {
     when (e.kind) {
       ZfKind.POST -> {}
       ZfKind.DEL -> {}
+      ZfKind.EDIT -> {}
       ZfKind.COMMENT -> {
         if (!e.sent) {
           // un contacto comenta una publicación mía
@@ -591,6 +624,52 @@ private fun zfBuildPosts(): List<ZfPost> {
       }
     }
   }
+  // ediciones: de más vieja a más nueva, así gana la última
+  edits.sortBy { it.tsMs }
+  for (e in edits) {
+    if (e.reply.isEmpty()) {
+      // editar una publicación: solo la hace su autor
+      val a = if (e.sent) mineAcc[e.pid] else theirAcc[e.pid + "|" + e.chatId]
+      if (a != null) a.editText = e.body
+    } else if (e.sent) {
+      // yo edité mi comentario (o, como autor, reenvié la edición de un contacto tras validarla)
+      val m = mineAcc[e.pid]
+      if (m != null) {
+        val cm = m.comments[e.reply]
+        if (cm != null) {
+          cm.text = e.body
+          cm.edited = true
+        }
+      } else {
+        val t = theirAcc[e.pid + "|" + e.chatId]
+        val cm = t?.comments?.get(e.reply)
+        if (cm != null && cm.mine) {
+          cm.text = e.body
+          cm.edited = true
+        }
+      }
+    } else {
+      val t = theirAcc[e.pid + "|" + e.chatId]
+      if (t != null) {
+        // el autor avisa que se editó un comentario
+        val cm = t.comments[e.reply]
+        if (cm != null) {
+          cm.text = e.body
+          cm.edited = true
+        }
+      } else {
+        // un contacto edita su propio comentario en mi publicación
+        val m = mineAcc[e.pid]
+        if (m != null && m.chats.contains(e.chatId)) {
+          val cm = m.comments[e.reply]
+          if (cm != null && cm.key == "c" + e.contactId) {
+            cm.text = e.body
+            cm.edited = true
+          }
+        }
+      }
+    }
+  }
   val res = ArrayList<ZfPost>()
   for (a in mineAcc.values + theirAcc.values) {
     if (a.mine && (deletedMine.contains(a.ev.pid) || zfIsDeletedLocal(a.ev.pid))) continue
@@ -642,7 +721,9 @@ private fun zfBuildPosts(): List<ZfPost> {
         ci = a.ev.ci,
         rh = a.ev.rh,
         chatId = a.ev.chatId,
-        text = a.ev.body,
+        text = a.editText ?: a.ev.body,
+        origText = a.ev.body,
+        edited = a.editText != null,
         tsMs = a.ev.tsMs,
         comments = liveComments.sortedBy { it.tsMs },
         counts = counts,
@@ -726,13 +807,20 @@ private suspend fun zfRefreshNow(): Boolean {
   return zfRefresh()
 }
 
-/** Lee el feed y, si la lectura fue completa, reenvía publicaciones anteriores a contactos que no las tienen. */
-private suspend fun zfRefreshAll() {
+/**
+ * Lee el feed y, si la lectura fue completa, reenvía publicaciones anteriores a contactos que no las tienen.
+ * force = botón «Actualizar»: se revisa a todos los contactos y se les envían TODAS las publicaciones que les falten,
+ * sin el tope de ZF_BACKFILL_POSTS que se usa en el envío automático.
+ */
+private suspend fun zfRefreshAll(force: Boolean = false) {
   if (zfRefresh()) {
+    withContext(Dispatchers.Main) { zfSending.value = true }
     try {
-      zfReconcile()
+      zfReconcile(force)
     } catch (e: Exception) {
       Log.e(TAG, "zetaria feed reconcile: " + e.stackTraceToString())
+    } finally {
+      withContext(NonCancellable + Dispatchers.Main) { zfSending.value = false }
     }
   }
 }
@@ -808,7 +896,8 @@ private suspend fun zfPublish(text: String, media: URI?, video: Boolean, audio: 
   val targets = withContext(Dispatchers.Main) { zfTargets() }
   if (targets.isEmpty()) return "Aún no tienes contactos conectados a quienes publicar."
   val lines = ArrayList<String>()
-  lines.add(ZF_POST + zfNewId(10))
+  val pidNew = zfNewId(10)
+  lines.add(ZF_POST + pidNew)
   for (o in options) lines.add(ZF_META_OPT + o.replace("\n", " ").trim().take(80))
   if (text.isNotEmpty()) lines.add(text)
   val out = zfPrepare(if (options.isEmpty()) media else null, video, lines.joinToString("\n"), audio)
@@ -817,7 +906,10 @@ private suspend fun zfPublish(text: String, media: URI?, video: Boolean, audio: 
   val mc = out.mc ?: return "No se pudo preparar la publicación."
   var ok = 0
   for (c in targets) {
-    if (zfSendOne(c, mc, out.file)) ok++
+    if (zfSendOne(c, mc, out.file)) {
+      ok++
+      withContext(Dispatchers.Main) { zfMarkSent(c, pidNew) }
+    }
   }
   return if (ok == 0) "No se pudo enviar la publicación." else null
 }
@@ -896,6 +988,68 @@ private suspend fun zfDeleteComment(p: ZfPost, cm: ZfComment): Boolean {
   return ok
 }
 
+/** Edita el texto de una publicación mía: se actualiza en mi feed y en el de mis contactos. */
+private suspend fun zfEditPost(p: ZfPost, newText: String): String? {
+  if (!p.mine) return "Solo puedes editar tus publicaciones."
+  val t = newText.trim().replace("\r", "").take(ZF_MAX_TEXT)
+  val hasMedia = p.ci.content.msgContent.let { it is MsgContent.MCImage || it is MsgContent.MCVideo || it is MsgContent.MCFile }
+  if (t.isEmpty() && !hasMedia && p.options.isEmpty()) return "La publicación no puede quedar vacía."
+  if (t == p.text) return null
+  val targets = withContext(Dispatchers.Main) { zfTargets() }
+  if (targets.isEmpty()) return "Aún no tienes contactos conectados."
+  val msg = ZF_EDIT + p.pid + (if (t.isNotEmpty()) "\n" + t else "")
+  var ok = false
+  for (c in targets) {
+    if (zfSendOne(c, MsgContent.MCText(msg), null)) ok = true
+  }
+  return if (ok) null else "No se pudo enviar la edición."
+}
+
+/** Edita el texto de un comentario mío: se actualiza para todos. */
+private suspend fun zfEditComment(p: ZfPost, cm: ZfComment, newText: String): String? {
+  val t = newText.trim().replace("\r", "").take(ZF_MAX_COMMENT)
+  val hasMedia = zfIsMediaItem(cm.ci)
+  if (t.isEmpty() && !hasMedia) return "El comentario no puede quedar vacío."
+  if (t == cm.text) return null
+  val msg = ZF_EDIT + p.pid + "\n" + ZF_META_REPLY + cm.cid + (if (t.isNotEmpty()) "\n" + t else "")
+  if (!p.mine) {
+    val c = withContext(Dispatchers.Main) { zfChatById(p.chatId) } ?: return "No se encontró el chat del autor."
+    return if (zfSendOne(c, MsgContent.MCText(msg), null)) null else "No se pudo enviar la edición."
+  }
+  val targets = withContext(Dispatchers.Main) { zfTargets() }
+  var ok = false
+  for (c in targets) {
+    if (zfSendOne(c, MsgContent.MCText(msg), null)) ok = true
+  }
+  return if (ok) null else "No se pudo enviar la edición."
+}
+
+/** Vuelve a publicar en MI feed una publicación (mía o ajena), con una nota de quién es el autor original. */
+private suspend fun zfShareToFeed(p: ZfPost, note: String): String? {
+  val targets = withContext(Dispatchers.Main) { zfTargets() }
+  if (targets.isEmpty()) return "Aún no tienes contactos conectados a quienes compartir."
+  val lines = ArrayList<String>()
+  val pidNew = zfNewId(10)
+  lines.add(ZF_POST + pidNew)
+  for (o in p.options) lines.add(ZF_META_OPT + o)
+  val body = StringBuilder()
+  body.append(if (p.mine) "🔁 Compartiendo mi publicación" else "🔁 Compartido de " + zfClean(p.authorName))
+  val extra = note.trim()
+  if (extra.isNotEmpty()) body.append("\n").append(extra)
+  if (p.text.isNotEmpty()) body.append("\n\n").append(p.text)
+  lines.add(body.toString().take(ZF_MAX_TEXT))
+  val src = zfFileOf(p.ci)
+  val mc = zfMakeContent(if (src != null) p.ci.content.msgContent else null, lines.joinToString("\n"))
+  var ok = 0
+  for (c in targets) {
+    if (zfSendOne(c, mc, src)) {
+      ok++
+      withContext(Dispatchers.Main) { zfMarkSent(c, pidNew) }
+    }
+  }
+  return if (ok == 0) "No se pudo compartir la publicación." else null
+}
+
 // ---------------------------------------------------------------------------
 // Mensajes que llegan: se marcan como leídos (no cuentan como mensaje sin leer), entran al feed y,
 // si soy el autor, reenvío los comentarios y reacciones al resto de mis contactos.
@@ -928,7 +1082,7 @@ private suspend fun zfHandleIncoming(rhId: Long?, user: UserLike, cInfo: ChatInf
     zfBump()
   }
   if (ev.sent) return
-  if (ev.kind != ZfKind.COMMENT && ev.kind != ZfKind.REACT && !(ev.kind == ZfKind.DEL && ev.reply.isNotEmpty())) return
+  if (ev.kind != ZfKind.COMMENT && ev.kind != ZfKind.REACT && !((ev.kind == ZfKind.DEL || ev.kind == ZfKind.EDIT) && ev.reply.isNotEmpty())) return
   if (ev.kind == ZfKind.COMMENT) {
     val f = ci.file
     if (f != null && zfFileOf(ci) == null) {
@@ -954,8 +1108,8 @@ private suspend fun zfRelayFromContact(rhId: Long?, cInfo: ChatInfo, ev: ZfEvent
     }
   }
   if (!mineHere) return
-  // solo quien escribió un comentario puede eliminarlo
-  if (ev.kind == ZfKind.DEL && !commentFromHim) return
+  // solo quien escribió un comentario puede eliminarlo o editarlo
+  if ((ev.kind == ZfKind.DEL || ev.kind == ZfKind.EDIT) && !commentFromHim) return
   val targets = withContext(Dispatchers.Main) { zfTargets() }.filter { it.chatInfo.id != cInfo.id }
   if (targets.isEmpty()) return
   val key = "c" + ev.contactId
@@ -966,6 +1120,10 @@ private suspend fun zfRelayFromContact(rhId: Long?, cInfo: ChatInfo, ev: ZfEvent
   if (ev.kind == ZfKind.DEL) {
     lines.add(ZF_DEL + ev.pid)
     lines.add(ZF_META_REPLY + ev.reply)
+  } else if (ev.kind == ZfKind.EDIT) {
+    lines.add(ZF_EDIT + ev.pid)
+    lines.add(ZF_META_REPLY + ev.reply)
+    if (ev.body.isNotEmpty()) lines.add(ev.body)
   } else if (ev.kind == ZfKind.COMMENT) {
     lines.add(ZF_CREL + ev.pid + " " + ev.cid + " " + key + " " + name)
     if (ev.reply.isNotEmpty()) lines.add(ZF_META_REPLY + ev.reply)
@@ -1049,23 +1207,37 @@ private fun zfChatOfContact(contactId: Long): Chat? = zfTargets().firstOrNull { 
   ci is ChatInfo.Direct && ci.contact.contactId == contactId
 }
 
+private fun zfSentKey(userId: Long, contactId: Long, pid: String): String = "zetaria_feed_sent_" + userId + "_" + contactId + "_" + pid
+
+/** Recuerda en el teléfono que ya se le envió esa publicación a ese contacto (el almacén solo lee los últimos mensajes). */
+private fun zfMarkSent(chat: Chat, pid: String) {
+  val ci = chat.chatInfo
+  if (ci !is ChatInfo.Direct) return
+  zfSetFlag(zfSentKey(zfUserId, ci.contact.contactId, pid))
+}
+
 /** ¿Ya le envié a ese chat esta publicación? Llamar desde el hilo principal con el almacén cargado. */
 private fun zfChatHasMyPost(chatId: String, pid: String): Boolean {
-  val m = zfEvents[chatId] ?: return false
-  for (e in m.values) {
-    if (e.kind == ZfKind.POST && e.sent && e.pid == pid) return true
+  val m = zfEvents[chatId]
+  if (m != null) {
+    for (e in m.values) {
+      if (e.kind == ZfKind.POST && e.sent && e.pid == pid) return true
+    }
   }
+  val ci = zfChatById(chatId)?.chatInfo
+  if (ci is ChatInfo.Direct && zfFlag(zfSentKey(zfUserId, ci.contact.contactId, pid))) return true
   return false
 }
 
 /**
  * Envía a un contacto las publicaciones mías que no tiene. wait = esperar a que el chat esté listo
  * (aviso de conexión). refreshed = el almacén ya se acaba de leer completo.
+ * force = ignora la marca de «ya enviado» y el tope de publicaciones (botón «Actualizar»).
  */
-private suspend fun zfBackfillContact(user: UserLike, contactId: Long, wait: Boolean, refreshed: Boolean): Boolean {
+private suspend fun zfBackfillContact(user: UserLike, contactId: Long, wait: Boolean, refreshed: Boolean, force: Boolean = false): Boolean {
   if (!zfIsActiveUser(user)) return false
   val flag = zfBfKey(user.userId, contactId)
-  if (zfFlag(flag)) return true
+  if (!force && zfFlag(flag)) return true
   if (!zfBackfilling.add(contactId)) return false
   try {
     var found: Chat? = null
@@ -1079,30 +1251,34 @@ private suspend fun zfBackfillContact(user: UserLike, contactId: Long, wait: Boo
     val chat = found ?: return false
     if (!refreshed && !zfRefreshNow()) return false
     val missing = withContext(Dispatchers.Main) {
-      zfBuildPosts()
+      val list = zfBuildPosts()
         .filter { it.mine && !zfChatHasMyPost(chat.id, it.pid) }
         .sortedByDescending { it.tsMs }
-        .take(ZF_BACKFILL_POSTS)
-        .reversed()
+      (if (force) list else list.take(ZF_BACKFILL_POSTS)).reversed()
     }
     if (missing.isEmpty()) return true
+    val maxItems = if (force) Int.MAX_VALUE else ZF_BACKFILL_ITEMS
     var allOk = true
     for (p in missing) {
-      if (!zfSendPostCopy(chat, p)) allOk = false
+      if (zfSendPostCopy(chat, p)) {
+        withContext(Dispatchers.Main) { zfMarkSent(chat, p.pid) }
+      } else {
+        allOk = false
+      }
       delay(150)
-      for (cm in p.comments.take(ZF_BACKFILL_ITEMS)) {
+      for (cm in p.comments.take(maxItems)) {
         zfSendCommentCopy(chat, p, cm)
         delay(150)
-        for (rc in cm.reactors.take(ZF_BACKFILL_ITEMS)) {
+        for (rc in cm.reactors.take(maxItems)) {
           zfSendReactionCopy(chat, p, rc, cm.cid)
           delay(100)
         }
       }
-      for (rc in p.reactors.take(ZF_BACKFILL_ITEMS)) {
+      for (rc in p.reactors.take(maxItems)) {
         zfSendReactionCopy(chat, p, rc, null)
         delay(100)
       }
-      for (v in p.voters.take(ZF_BACKFILL_ITEMS)) {
+      for (v in p.voters.take(maxItems)) {
         zfSendReactionCopy(chat, p, ZfReactor(v.key, v.name, "#" + v.option, v.avatar), null)
         delay(100)
       }
@@ -1115,7 +1291,7 @@ private suspend fun zfBackfillContact(user: UserLike, contactId: Long, wait: Boo
 }
 
 /** Revisa todos los contactos y reenvía lo que les falte. Solo llamar justo después de una lectura completa. */
-private suspend fun zfReconcile() {
+private suspend fun zfReconcile(force: Boolean = false) {
   val user = chatModel.currentUser.value ?: return
   val ids = withContext(Dispatchers.Main) {
     val res = ArrayList<Long>()
@@ -1126,7 +1302,7 @@ private suspend fun zfReconcile() {
     res
   }
   for (id in ids) {
-    zfBackfillContact(user, id, false, true)
+    zfBackfillContact(user, id, false, true, force)
   }
 }
 
@@ -1135,10 +1311,16 @@ private suspend fun zfSendPostCopy(c: Chat, p: ZfPost): Boolean {
   lines.add(ZF_POST + p.pid)
   for (o in p.options) lines.add(ZF_META_OPT + o)
   lines.add(ZF_META_TIME + (p.tsMs / 1000L))
-  if (p.text.isNotEmpty()) lines.add(p.text)
+  if (p.origText.isNotEmpty()) lines.add(p.origText)
   val src = zfFileOf(p.ci)
   val mc = zfMakeContent(if (src != null) p.ci.content.msgContent else null, lines.joinToString("\n"))
-  return zfSendOne(c, mc, src)
+  val ok = zfSendOne(c, mc, src)
+  // si se editó, el contacto nuevo recibe primero el original y luego la edición (así también ve el original)
+  if (ok && p.edited) {
+    delay(150)
+    zfSendOne(c, MsgContent.MCText(ZF_EDIT + p.pid + (if (p.text.isNotEmpty()) "\n" + p.text else "")), null)
+  }
+  return ok
 }
 
 private suspend fun zfSendCommentCopy(c: Chat, p: ZfPost, cm: ZfComment): Boolean {
@@ -1149,10 +1331,15 @@ private suspend fun zfSendCommentCopy(c: Chat, p: ZfPost, cm: ZfComment): Boolea
   val av = if (own) null else zfSmallAvatar(cm.avatar)
   if (av != null) lines.add(ZF_META_AVATAR + av)
   lines.add(ZF_META_TIME + (cm.tsMs / 1000L))
-  if (cm.text.isNotEmpty()) lines.add(cm.text)
+  if (cm.origText.isNotEmpty()) lines.add(cm.origText)
   val src = zfFileOf(cm.ci)
   val mc = zfMakeContent(if (src != null) cm.ci.content.msgContent else null, lines.joinToString("\n"))
-  return zfSendOne(c, mc, src)
+  val ok = zfSendOne(c, mc, src)
+  if (ok && cm.edited) {
+    delay(150)
+    zfSendOne(c, MsgContent.MCText(ZF_EDIT + p.pid + "\n" + ZF_META_REPLY + cm.cid + (if (cm.text.isNotEmpty()) "\n" + cm.text else "")), null)
+  }
+  return ok
 }
 
 private suspend fun zfSendReactionCopy(c: Chat, p: ZfPost, rc: ZfReactor, target: String?): Boolean {
@@ -1367,6 +1554,7 @@ fun ZetariaFeedScreen() {
   val version = zfVersion.value
   val posts = remember(version) { zfBuildPosts() }
   val loading = zfLoading.value
+  val sending = zfSending.value
   val secondary = MaterialTheme.colors.secondary
   val primary = MaterialTheme.colors.primary
   var showPublish by remember { mutableStateOf(false) }
@@ -1397,7 +1585,7 @@ fun ZetariaFeedScreen() {
     item(key = "status") {
       Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(
-          if (loading) "Actualizando…" else (posts.size.toString() + (if (posts.size == 1) " publicación" else " publicaciones")),
+          if (loading || sending) "Actualizando…" else (posts.size.toString() + (if (posts.size == 1) " publicación" else " publicaciones")),
           Modifier.weight(1f),
           fontSize = 12.sp,
           color = secondary
@@ -1407,12 +1595,12 @@ fun ZetariaFeedScreen() {
           fontSize = 13.sp,
           color = primary,
           modifier = Modifier
-            .clickable(enabled = !loading) { scope.launch(Dispatchers.IO) { zfRefreshAll() } }
+            .clickable(enabled = !loading && !sending) { scope.launch(Dispatchers.IO) { zfRefreshAll(true) } }
             .padding(8.dp)
         )
       }
     }
-    if (posts.isEmpty() && !loading) {
+    if (posts.isEmpty() && !loading && !sending) {
       item(key = "empty") {
         Text(
           "Aún no hay publicaciones. Las de tus contactos aparecerán aquí, de la más nueva a la más antigua.",
@@ -2015,23 +2203,101 @@ private fun zfThread(comments: List<ZfComment>): List<Pair<ZfComment, Int>> {
 private fun ZfEmojiTray(mine: String?, small: Boolean, onPick: (String) -> Unit) {
   val primary = MaterialTheme.colors.primary
   val secondary = MaterialTheme.colors.secondary
-  Row(
-    Modifier
-      .clip(RoundedCornerShape(26.dp))
-      .background(secondary.copy(alpha = 0.18f))
-      .padding(horizontal = 6.dp, vertical = 4.dp)
-      .horizontalScroll(rememberScrollState()),
-    horizontalArrangement = Arrangement.spacedBy(2.dp)
-  ) {
-    for (em in ZF_EMOJIS) {
+  var showCustom by remember { mutableStateOf(false) }
+  // si mi reacción es un emoji personalizado, aparece en la bandeja para poder quitarlo con un toque
+  val emojis = if (mine != null && mine != "-" && !ZF_EMOJIS.contains(mine)) ZF_EMOJIS + mine else ZF_EMOJIS
+  Box {
+    Row(
+      Modifier
+        .clip(RoundedCornerShape(26.dp))
+        .background(secondary.copy(alpha = 0.18f))
+        .padding(horizontal = 6.dp, vertical = 4.dp)
+        .horizontalScroll(rememberScrollState()),
+      horizontalArrangement = Arrangement.spacedBy(2.dp),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      for (em in emojis) {
+        Box(
+          Modifier
+            .clip(CircleShape)
+            .background(if (mine == em) primary.copy(alpha = 0.35f) else Color.Transparent)
+            .clickable { onPick(em) }
+            .padding(if (small) 5.dp else 7.dp)
+        ) {
+          Text(em, fontSize = if (small) 20.sp else 26.sp)
+        }
+      }
+      // «+»: elegir cualquier otro emoji
       Box(
         Modifier
           .clip(CircleShape)
-          .background(if (mine == em) primary.copy(alpha = 0.35f) else Color.Transparent)
-          .clickable { onPick(em) }
-          .padding(if (small) 5.dp else 7.dp)
+          .background(secondary.copy(alpha = 0.25f))
+          .clickable { showCustom = true }
+          .padding(horizontal = if (small) 9.dp else 11.dp, vertical = if (small) 3.dp else 4.dp),
+        contentAlignment = Alignment.Center
       ) {
-        Text(em, fontSize = if (small) 20.sp else 26.sp)
+        Text("+", fontSize = if (small) 20.sp else 26.sp, fontWeight = FontWeight.Bold, color = primary)
+      }
+    }
+    if (showCustom) {
+      ZfCustomEmojiDialog(
+        onPick = { em ->
+          showCustom = false
+          onPick(em)
+        },
+        onDismiss = { showCustom = false }
+      )
+    }
+  }
+}
+
+private val ZF_EXTRA_EMOJIS = listOf(
+  "🔥", "🎉", "👏", "💯", "🤔", "🤡", "💀", "😍", "😎", "🥳", "🤯", "😴", "🤝", "💔", "✅", "👎",
+  "😭", "🤣", "😅", "🙄", "😤", "🤬", "🥺", "💪", "👀", "🙌", "💩", "🚀"
+)
+
+/** Elegir un emoji personalizado: uno de la lista o cualquiera escrito/pegado con el teclado. */
+@Composable
+private fun ZfCustomEmojiDialog(onPick: (String) -> Unit, onDismiss: () -> Unit) {
+  var text by remember { mutableStateOf("") }
+  val clean = text.trim()
+  val valid = zfIsCustomEmoji(clean)
+  Dialog(onDismissRequest = onDismiss) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
+      Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Text("Emoji personalizado", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text(
+          "Toca uno de la lista o escribe (o pega) el emoji que quieras con tu teclado.",
+          fontSize = 12.sp,
+          color = MaterialTheme.colors.secondary
+        )
+        Spacer(Modifier.height(10.dp))
+        val rows = ZF_EXTRA_EMOJIS.chunked(7)
+        for (row in rows) {
+          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            for (em in row) {
+              Box(Modifier.clip(CircleShape).clickable { onPick(em) }.padding(6.dp)) {
+                Text(em, fontSize = 24.sp)
+              }
+            }
+          }
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+          text,
+          { if (it.length <= ZF_MAX_EMOJI_LEN) text = it },
+          label = { Text("Otro emoji") },
+          modifier = Modifier.fillMaxWidth(),
+          singleLine = true
+        )
+        if (clean.isNotEmpty() && !valid) {
+          Text("Escribe solo un emoji (sin letras ni números).", fontSize = 12.sp, color = MaterialTheme.colors.error)
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+          TextButton(onClick = onDismiss) { Text("Cancelar") }
+          TextButton(onClick = { onPick(clean) }, enabled = valid) { Text("Reaccionar") }
+        }
       }
     }
   }
@@ -2054,6 +2320,8 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
   var reacting by remember(c.cid) { mutableStateOf(false) }
   var trayOpen by remember(c.cid) { mutableStateOf(false) }
   var showReactors by remember(c.cid) { mutableStateOf(false) }
+  var showEdit by remember(c.cid) { mutableStateOf(false) }
+  var showOriginal by remember(c.cid) { mutableStateOf(false) }
   val primary = MaterialTheme.colors.primary
   val secondary = MaterialTheme.colors.secondary
   val onBg = MaterialTheme.colors.onBackground
@@ -2065,6 +2333,14 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
         Text(c.name, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = onBg, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         Spacer(Modifier.width(8.dp))
         Text(c.tsText, fontSize = 11.sp, color = secondary)
+        if (c.edited) {
+          Text(
+            "· editado",
+            fontSize = 11.sp,
+            color = primary,
+            modifier = Modifier.clickable { showOriginal = true }.padding(start = 6.dp)
+          )
+        }
       }
       if (parentName != null) {
         Text("↪ en respuesta a " + parentName, fontSize = 11.sp, color = secondary)
@@ -2089,6 +2365,15 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
           color = secondary,
           modifier = Modifier.clickable { onReply() }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
         )
+        if (c.mine) {
+          Text(
+            "✏️ Editar",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = secondary,
+            modifier = Modifier.clickable { showEdit = true }.padding(top = 6.dp, bottom = 6.dp, end = 14.dp)
+          )
+        }
         if (onDelete != null) {
           Text(
             "Eliminar",
@@ -2118,6 +2403,19 @@ private fun ZfCommentRow(p: ZfPost, c: ZfComment, depth: Int, parentName: String
   }
   if (showReactors) {
     ZfReactorsDialog(c.reactors) { showReactors = false }
+  }
+  if (showEdit) {
+    ZfEditDialog(
+      title = "Editar comentario",
+      original = c.origText,
+      current = c.text,
+      maxLen = ZF_MAX_COMMENT,
+      onSave = { nt -> zfEditComment(p, c, nt) },
+      onDismiss = { showEdit = false }
+    )
+  }
+  if (showOriginal) {
+    ZfOriginalDialog("Comentario editado", c.origText, c.text) { showOriginal = false }
   }
 }
 
@@ -2251,6 +2549,202 @@ private fun ZfDeleteDialog(title: String, message: String, busy: Boolean, onConf
   }
 }
 
+/** Caja con un texto de solo lectura (para mostrar el original). */
+@Composable
+private fun ZfQuote(label: String, text: String) {
+  val secondary = MaterialTheme.colors.secondary
+  Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = secondary)
+  Spacer(Modifier.height(4.dp))
+  Box(
+    Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(10.dp))
+      .background(secondary.copy(alpha = 0.12f))
+      .padding(10.dp)
+  ) {
+    Text(
+      if (text.isEmpty()) "(sin texto)" else text,
+      fontSize = 14.sp,
+      color = if (text.isEmpty()) secondary else MaterialTheme.colors.onBackground
+    )
+  }
+}
+
+/** Ventana para editar: muestra arriba el original (antes de editar) y debajo el campo para cambiarlo. */
+@Composable
+private fun ZfEditDialog(
+  title: String,
+  original: String,
+  current: String,
+  maxLen: Int,
+  onSave: suspend (String) -> String?,
+  onDismiss: () -> Unit
+) {
+  var text by remember { mutableStateOf(current) }
+  var busy by remember { mutableStateOf(false) }
+  var error by remember { mutableStateOf<String?>(null) }
+  val secondary = MaterialTheme.colors.secondary
+  Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
+      Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        ZfQuote("Original (antes de editar)", original)
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+          text,
+          { if (it.length <= maxLen) text = it },
+          label = { Text("Texto nuevo") },
+          modifier = Modifier.fillMaxWidth(),
+          maxLines = 8,
+          enabled = !busy
+        )
+        Text("Se verá «editado» y quien quiera podrá ver el original.", fontSize = 12.sp, color = secondary, modifier = Modifier.padding(top = 4.dp))
+        val err = error
+        if (err != null) {
+          Text(err, color = MaterialTheme.colors.error, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+          if (busy) {
+            Text("Guardando…", fontSize = 13.sp, color = secondary, modifier = Modifier.padding(end = 8.dp))
+          }
+          TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancelar") }
+          TextButton(
+            onClick = {
+              val nt = text
+              busy = true
+              error = null
+              withLongRunningApi {
+                var res: String? = "No se pudo guardar la edición."
+                try {
+                  res = onSave(nt)
+                } catch (e: Exception) {
+                  Log.e(TAG, "zetaria feed edit: " + e.stackTraceToString())
+                } finally {
+                  withContext(Dispatchers.Main) { busy = false }
+                }
+                withContext(Dispatchers.Main) {
+                  if (res == null) { onDismiss() } else { error = res }
+                }
+              }
+            },
+            enabled = !busy && text.trim() != current.trim()
+          ) { Text("Guardar") }
+        }
+      }
+    }
+  }
+}
+
+/** Ventana que muestra la versión original de algo ya editado, junto a la versión actual. */
+@Composable
+private fun ZfOriginalDialog(title: String, original: String, current: String, onDismiss: () -> Unit) {
+  Dialog(onDismissRequest = onDismiss) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
+      Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        ZfQuote("Original", original)
+        Spacer(Modifier.height(12.dp))
+        ZfQuote("Versión actual (editada)", current)
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+          TextButton(onClick = onDismiss) { Text("Cerrar") }
+        }
+      }
+    }
+  }
+}
+
+/** Compartir una publicación: en mi propio Feed (a mis contactos) o fuera de Zetaria con el menú de Android. */
+@Composable
+private fun ZfShareDialog(p: ZfPost, onDismiss: () -> Unit) {
+  var note by remember { mutableStateOf("") }
+  var busy by remember { mutableStateOf(false) }
+  var error by remember { mutableStateOf<String?>(null) }
+  val clipboard = LocalClipboardManager.current
+  val primary = MaterialTheme.colors.primary
+  val secondary = MaterialTheme.colors.secondary
+  val targetCount = remember { zfTargets().size }
+  Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colors.background) {
+      Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Text("Compartir publicación", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        ZfQuote(p.authorName, if (p.text.isEmpty()) "(publicación con archivo adjunto)" else p.text.take(300))
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+          note,
+          { if (it.length <= 500) note = it },
+          label = { Text("Añade un comentario (opcional)") },
+          modifier = Modifier.fillMaxWidth(),
+          maxLines = 4,
+          enabled = !busy
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+          "🔁 Compartir en mi Feed",
+          color = primary,
+          fontWeight = FontWeight.SemiBold,
+          modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !busy) {
+              val n = note
+              busy = true
+              error = null
+              withLongRunningApi {
+                var res: String? = "No se pudo compartir."
+                try {
+                  res = zfShareToFeed(p, n)
+                } catch (e: Exception) {
+                  Log.e(TAG, "zetaria feed share: " + e.stackTraceToString())
+                } finally {
+                  withContext(Dispatchers.Main) { busy = false }
+                }
+                withContext(Dispatchers.Main) {
+                  if (res == null) {
+                    showToast("Compartido en tu Feed")
+                    onDismiss()
+                  } else {
+                    error = res
+                  }
+                }
+              }
+            }
+            .padding(vertical = 12.dp)
+        )
+        Text(
+          "Se publicará con tu nombre a " + targetCount + (if (targetCount == 1) " contacto." else " contactos."),
+          fontSize = 12.sp,
+          color = secondary
+        )
+        Text(
+          "📤 Enviar a otra app",
+          color = primary,
+          fontWeight = FontWeight.SemiBold,
+          modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !busy) {
+              val sb = StringBuilder()
+              if (note.isNotBlank()) sb.append(note.trim()).append("\n\n")
+              sb.append(p.authorName).append(":")
+              if (p.text.isNotEmpty()) sb.append("\n").append(p.text)
+              clipboard.shareText(sb.toString())
+              onDismiss()
+            }
+            .padding(vertical = 12.dp)
+        )
+        val err = error
+        if (err != null) {
+          Text(err, color = MaterialTheme.colors.error, fontSize = 13.sp)
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
+          TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancelar") }
+        }
+      }
+    }
+  }
+}
+
 @Composable
 private fun ZfPoll(p: ZfPost, onShowVoters: () -> Unit) {
   var busy by remember(p.key) { mutableStateOf(false) }
@@ -2319,6 +2813,9 @@ private fun ZfPostCard(p: ZfPost) {
   var trayOpen by remember(p.key) { mutableStateOf(false) }
   var replyTo by remember(p.key) { mutableStateOf<ZfComment?>(null) }
   var busy by remember(p.key) { mutableStateOf(false) }
+  var showEdit by remember(p.key) { mutableStateOf(false) }
+  var showShare by remember(p.key) { mutableStateOf(false) }
+  var showOriginal by remember(p.key) { mutableStateOf(false) }
   val primary = MaterialTheme.colors.primary
   val secondary = MaterialTheme.colors.secondary
   val onBg = MaterialTheme.colors.onBackground
@@ -2335,9 +2832,21 @@ private fun ZfPostCard(p: ZfPost) {
       Spacer(Modifier.width(10.dp))
       Column(Modifier.weight(1f)) {
         Text(p.authorName, fontWeight = FontWeight.Bold, color = onBg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(getTimestampText(p.ci.meta.itemTs), fontSize = 12.sp, color = secondary)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Text(getTimestampText(p.ci.meta.itemTs), fontSize = 12.sp, color = secondary)
+          if (p.edited) {
+            Text(
+              "· editado",
+              fontSize = 12.sp,
+              color = primary,
+              modifier = Modifier.clickable { showOriginal = true }.padding(start = 6.dp)
+            )
+          }
+        }
       }
+      Text("📤", fontSize = 18.sp, modifier = Modifier.clickable { showShare = true }.padding(8.dp))
       if (p.mine) {
+        Text("✏️", fontSize = 18.sp, modifier = Modifier.clickable { showEdit = true }.padding(8.dp))
         Text("🗑", fontSize = 18.sp, modifier = Modifier.clickable { showDelete = true }.padding(8.dp))
       }
     }
@@ -2417,6 +2926,22 @@ private fun ZfPostCard(p: ZfPost) {
   }
   if (showReactors) {
     ZfReactorsDialog(p.reactors) { showReactors = false }
+  }
+  if (showEdit) {
+    ZfEditDialog(
+      title = "Editar publicación",
+      original = p.origText,
+      current = p.text,
+      maxLen = ZF_MAX_TEXT,
+      onSave = { nt -> zfEditPost(p, nt) },
+      onDismiss = { showEdit = false }
+    )
+  }
+  if (showShare) {
+    ZfShareDialog(p) { showShare = false }
+  }
+  if (showOriginal) {
+    ZfOriginalDialog("Publicación editada", p.origText, p.text) { showOriginal = false }
   }
   if (showVoters) {
     ZfVotersDialog(p) { showVoters = false }
