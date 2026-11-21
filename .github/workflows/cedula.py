@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Zetaria: «Crear cédula del Reino Soberano de Zetaria» (sustituye a «Obtener nombre SimpleX (BETA)»).
+
+En Ajustes > Dirección, el botón del nombre de SimpleX pasa a ser el de la cédula. Dentro:
+  - ID único aleatorio (ZET-XXXX-XXXX-XXXX-XXXX-XXXX) que se genera una sola vez al instalar la app y no cambia.
+    Vive en un archivo interno (zetaria_id) de la carpeta de la base de datos y en los ajustes de la app, así que
+    viaja con la exportación/importación de la base de datos.
+  - La cédula reúne nombre de perfil + foto de perfil + QR de la dirección de SimpleX + ID.
+  - «Renovar cédula» vuelve a tomar nombre, foto y enlace actuales; el ID se queda igual.
+  - «Compartir cédula» genera una imagen PNG de la cédula.
+
+Además: los archivos internos zetaria_* no cuentan ni se borran en «Archivos y multimedia» (para no perder el ID).
+
+TRANSACCIONAL (todo o nada), salvo el gancho de arranque (opcional: si no encaja, el ID se crea al abrir la cédula).
+Uso: cedula.py <ruta a apps/multiplatform>
+"""
+import sys, pathlib
+
+mp = pathlib.Path(sys.argv[1]).resolve()
+here = pathlib.Path(__file__).parent
+tpl = here / "templates" / "cedula"
+src = mp / "common/src"
+K = "kotlin/chat/simplex/common"
+edits, orig = {}, {}
+
+
+def die(msg, ctx=None):
+    print(f"\n::warning::Cédula NO aplicada: {msg}")
+    print(f"ERROR (cedula): {msg}")
+    if ctx:
+        print("----- contexto -----")
+        print(ctx)
+        print("--------------------")
+    print("No se modificó ningún archivo.")
+    sys.exit(1)
+
+
+def read(path, label):
+    if not path.exists():
+        die(f"no existe {label}")
+    if path not in orig:
+        orig[path] = path.read_text(encoding="utf-8")
+        edits[path] = orig[path]
+    return path
+
+
+def once(p, old, new, what):
+    n = edits[p].count(old)
+    if n != 1:
+        die(f"{what}: el texto esperado aparece {n} veces (debía ser 1) en {p.name}", old)
+    edits[p] = edits[p].replace(old, new, 1)
+    print(f"   [cedula] {what}")
+
+
+# 1) Dirección: el botón del nombre de SimpleX pasa a ser el de la cédula
+rel = f"commonMain/{K}/views/usersettings/UserAddressView.kt"
+p = read(src / rel, rel)
+once(p, "import SectionViewWithButton\n",
+     "import SectionViewWithButton\n"
+     "import chat.simplex.common.views.zetaria.ZetariaCedula\n"
+     "import chat.simplex.common.views.zetaria.ZetariaCedulaView\n",
+     "imports de la cédula")
+
+t = edits[p]
+start_marker = "          val domain = user?.profile?.contactDomain?.domain\n"
+end_marker = "              iconColor = MaterialTheme.colors.secondary\n            )\n          }\n"
+if t.count(start_marker) != 1:
+    die(f"no encuentro el bloque del nombre de SimpleX ({t.count(start_marker)} coincidencias)", start_marker)
+i = t.index(start_marker)
+j = t.find(end_marker, i)
+if j < 0 or "SetSimplexDomainView(" not in t[i:j] or "get_simplex_name_beta" not in t[i:j]:
+    die("el bloque del nombre de SimpleX no tiene la forma esperada", t[i:i + 600])
+j += len(end_marker)
+block = (
+    "          SectionView {\n"
+    "            SettingsActionItem(\n"
+    "              painterResource(MR.images.ic_qr_code),\n"
+    "              ZetariaCedula.buttonLabel(),\n"
+    "              click = {\n"
+    "                val zetariaLink = userAddress.connLinkContact.simplexChatUri(short = userAddress.connLinkContact.connShortLink != null)\n"
+    "                ModalManager.start.showModal(cardScreen = true) { ZetariaCedulaView(user, zetariaLink) }\n"
+    "              },\n"
+    "              iconColor = MaterialTheme.colors.secondary\n"
+    "            )\n"
+    "          }\n"
+)
+edits[p] = t[:i] + block + t[j:]
+print("   [cedula] botón de la cédula en vez de «Obtener nombre SimpleX»")
+
+# 2) Los archivos internos zetaria_* no se cuentan ni se borran con «Eliminar archivos»
+rel = f"commonMain/{K}/views/helpers/Utils.kt"
+p = read(src / rel, rel)
+once(p, "    File(dir).listFiles()?.forEach {\n      fileCount++\n",
+     "    File(dir).listFiles()?.filter { !it.name.startsWith(\"zetaria_\") }?.forEach {\n      fileCount++\n",
+     "contador de archivos ignora zetaria_*")
+once(p, "    dir.list()?.forEach {\n      removeFile(it)\n    }\n",
+     "    dir.list()?.forEach {\n      if (!it.startsWith(\"zetaria_\")) removeFile(it)\n    }\n",
+     "«eliminar todo» respeta zetaria_*")
+
+# 3) Gancho de arranque (opcional): el ID se crea al abrir la app por primera vez
+hook_path = mp / "android/src/main/java/chat/simplex/app/SimplexApp.kt"
+hook_old = "    deleteOldChatArchive()\n"
+hook_done = False
+if hook_path.exists():
+    ht = hook_path.read_text(encoding="utf-8")
+    if ht.count(hook_old) == 1:
+        orig[hook_path] = ht
+        edits[hook_path] = ht.replace(hook_old, hook_old + "    chat.simplex.common.views.zetaria.ZetariaCedula.ensureId()\n", 1)
+        hook_done = True
+        print("   [cedula] el ID se crea al abrir la app por primera vez")
+if not hook_done:
+    print("   [cedula] aviso: no encontré el punto de arranque; el ID se creará al abrir la cédula (sigue siendo único y permanente)")
+
+# 4) Archivos nuevos
+d = f"{K}/views/zetaria"
+new_files = {
+    src / f"commonMain/{d}/ZetariaCedula.kt": (tpl / "ZetariaCedula.kt").read_text(encoding="utf-8"),
+    src / f"androidMain/{d}/ZetariaCedula.android.kt": (tpl / "ZetariaCedula.android.kt").read_text(encoding="utf-8"),
+}
+if (src / "desktopMain").exists():
+    new_files[src / f"desktopMain/{d}/ZetariaCedula.desktop.kt"] = (tpl / "ZetariaCedula.desktop.kt").read_text(encoding="utf-8")
+
+for pth, txt in edits.items():
+    if txt != orig[pth]:
+        pth.write_text(txt, encoding="utf-8")
+for pth, txt in new_files.items():
+    pth.parent.mkdir(parents=True, exist_ok=True)
+    pth.write_text(txt, encoding="utf-8")
+print(f"   [cedula] listo: {sum(1 for q in edits if edits[q] != orig[q])} archivos modificados, {len(new_files)} nuevos")

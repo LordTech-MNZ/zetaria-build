@@ -186,6 +186,22 @@ jobs:
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
+      - name: Explorador de archivos (Datos del chat > ver y eliminar archivos pesados uno a uno)
+        # Transaccional (todo o nada): si no encaja con el código de SimpleX, el build sigue sin este botón.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name dbfiles.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Cédula del Reino Soberano de Zetaria (reemplaza «Obtener nombre SimpleX»)
+        # Transaccional (todo o nada): si no encaja con el código de SimpleX, el build sigue sin la cédula.
+        continue-on-error: true
+        run: |
+          SCRIPT=$(find overlay -name cedula.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
       - name: Animación de arranque (fondo cósmico, estrellas y símbolo MNZ en HD)
         # Transaccional (todo o nada); la parte de la pantalla de inicio del sistema se omite sola si no encaja.
         continue-on-error: true
