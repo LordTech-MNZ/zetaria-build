@@ -17,6 +17,8 @@
 - Compartir una publicación (📤): en tu propio Feed o hacia otra app del teléfono, con su imagen, video o audio.
 - Descarga de videos y audios en el Feed con indicador, reintento y reproducción automática al terminar; opción
   de descarga automática (apagada / audios / audios y videos pequeños, máx. 2 a la vez).
+- La descarga lee el estado real del archivo en el núcleo (ruta, porcentaje, errores): ya no hace falta reiniciar la app
+  para ver un video o audio descargado. Los videos tienen botón de pantalla completa (cuadro).
 - Botón para guardar audios (Música/Zetaria Feed) y publicación de archivos de cualquier formato (hasta 50 MB),
   que los demás pueden descargar, abrir y guardar (Descargas/Zetaria Feed).
 - Aviso (globito con número) en la pestaña «Feed» cuando hay publicaciones nuevas.
