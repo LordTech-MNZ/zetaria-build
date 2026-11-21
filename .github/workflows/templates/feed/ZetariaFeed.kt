@@ -1776,6 +1776,106 @@ private fun ZfRoundButton(label: String, size: Dp, fontSize: Int, onClick: () ->
 }
 
 @Composable
+private fun ZfFullscreenVideo(
+  player: VideoPlayer,
+  preview: ImageBitmap,
+  durationMs: Long,
+  play: () -> Unit,
+  stop: () -> Unit,
+  skip: (Long) -> Unit,
+  onClose: () -> Unit
+) {
+  val playing = remember(player) { player.videoPlaying }
+  val progress = remember(player) { player.progress }
+  val duration = remember(player) { player.duration }
+  var controlsVisible by remember { mutableStateOf(true) }
+  var dragValue by remember { mutableStateOf<Float?>(null) }
+  val total = if (duration.value > 0L) duration.value else durationMs
+  LaunchedEffect(controlsVisible, playing.value, dragValue) {
+    if (controlsVisible && playing.value && dragValue == null) {
+      delay(3500)
+      controlsVisible = false
+    }
+  }
+  Dialog(
+    onDismissRequest = onClose,
+    properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+  ) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+      val aspect = if (preview.height > 0) preview.width.toFloat() / preview.height.toFloat() else 1.7778f
+      val w = minOf(maxWidth, maxHeight * aspect)
+      Box(Modifier.align(Alignment.Center).width(w)) {
+        PlayerView(
+          player,
+          w,
+          onClick = {
+            play()
+            controlsVisible = true
+          },
+          onLongClick = {},
+          stop = { controlsVisible = !controlsVisible }
+        )
+        if (!playing.value || progress.value == 0L) {
+          Image(preview, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
+        }
+      }
+      if (!playing.value || controlsVisible) {
+        Row(
+          Modifier.align(Alignment.Center),
+          horizontalArrangement = Arrangement.spacedBy(18.dp),
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          ZfRoundButton("↺10", 46.dp, 13) { skip(-10_000L) }
+          ZfRoundButton(if (playing.value) "⏸" else "▶", 60.dp, 26) {
+            if (playing.value) stop() else play()
+            controlsVisible = true
+          }
+          ZfRoundButton("10↻", 46.dp, 13) { skip(10_000L) }
+        }
+        Box(
+          Modifier
+            .align(Alignment.TopEnd)
+            .padding(16.dp)
+            .size(40.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .clickable { onClose() },
+          contentAlignment = Alignment.Center
+        ) {
+          Text("✕", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+          Row(Modifier.fillMaxWidth()) {
+            Text(zfClock(progress.value), fontSize = 12.sp, color = Color.White)
+            Spacer(Modifier.weight(1f))
+            Text(zfClock(total), fontSize = 12.sp, color = Color.White)
+          }
+          val frac = dragValue ?: (if (total > 0L) (progress.value.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f)
+          Slider(
+            value = frac,
+            onValueChange = {
+              dragValue = it
+              controlsVisible = true
+            },
+            onValueChangeFinished = {
+              val dv = dragValue
+              if (dv != null) zetariaVideoSeek(player, (dv * total.toFloat()).toLong())
+              dragValue = null
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = SliderDefaults.colors(
+              thumbColor = Color.White,
+              activeTrackColor = Color.White,
+              inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+            )
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
 private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, maxWidth: Dp, autoPlay: Boolean) {
   var uri by remember(file.fileId) { mutableStateOf<URI?>(null) }
   var failed by remember(file.fileId) { mutableStateOf(false) }
@@ -1835,6 +1935,7 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
   val pv by remember(u) { player.preview }
   var controlsVisible by remember(u) { mutableStateOf(true) }
   var dragValue by remember(u) { mutableStateOf<Float?>(null) }
+  var full by remember(u) { mutableStateOf(false) }
   val play = {
     player.enableSound(true)
     player.play(true)
@@ -1860,6 +1961,9 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
   DisposableEffect(u) {
     onDispose { stop() }
   }
+  if (full) {
+    ZfFullscreenVideo(player, preview, durationMs, play, stop, skip) { full = false }
+  }
   // mientras se reproduce, los controles se esconden solos
   LaunchedEffect(controlsVisible, playing.value, dragValue) {
     if (controlsVisible && playing.value && dragValue == null) {
@@ -1871,21 +1975,38 @@ private fun ZfVideoPlayer(file: CIFile, preview: ImageBitmap, durationMs: Long, 
   val showControls = !playing.value || controlsVisible
   val total = if (duration.value > 0L) duration.value else durationMs
   Box(Modifier.width(width).clip(RoundedCornerShape(10.dp))) {
-    PlayerView(
-      player,
-      width,
-      onClick = {
-        play()
-        controlsVisible = true
-      },
-      onLongClick = {},
-      stop = { controlsVisible = !controlsVisible }
-    )
-    if (showPreview) {
+    if (!full) {
+      PlayerView(
+        player,
+        width,
+        onClick = {
+          play()
+          controlsVisible = true
+        },
+        onLongClick = {},
+        stop = { controlsVisible = !controlsVisible }
+      )
+    } else {
+      Image(preview, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
+    }
+    if (showPreview && !full) {
       Image(pv, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
     }
-    if (showControls) {
+    if (showControls && !full) {
       Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
+      // botón del cuadro: pantalla completa
+      Box(
+        Modifier
+          .align(Alignment.TopEnd)
+          .padding(8.dp)
+          .size(34.dp)
+          .clip(RoundedCornerShape(8.dp))
+          .background(Color.Black.copy(alpha = 0.55f))
+          .clickable { full = true },
+        contentAlignment = Alignment.Center
+      ) {
+        Box(Modifier.size(16.dp).border(2.dp, Color.White, RoundedCornerShape(3.dp)))
+      }
       Row(
         Modifier.align(Alignment.Center),
         horizontalArrangement = Arrangement.spacedBy(18.dp),
@@ -1996,27 +2117,66 @@ private suspend fun zfReceive(rh: Long?, file: CIFile, auto: Boolean) {
   }
 }
 
-private class ZfDlState(val rh: Long?, val file: CIFile?) {
+/**
+ * Causa del «tarda mucho» de antes: el mensaje que tiene el Feed es una «foto» del momento en que llegó, y ahí el archivo
+ * todavía no tiene ruta en el teléfono (fileSource = null). Aunque la descarga terminara, se seguía mirando esa foto vieja
+ * y el archivo no «aparecía» hasta reiniciar la app (que vuelve a leer los mensajes). Ahora, mientras se descarga, se
+ * vuelve a pedir el mensaje al núcleo: de ahí salen la ruta real, el porcentaje y los errores de verdad.
+ */
+private fun zfChatOfItem(itemId: Long): Chat? {
+  for (en in zfEvents.entries) {
+    if (en.value.containsKey(itemId)) return zfChatById(en.key)
+  }
+  return null
+}
+
+private suspend fun zfFetchItem(itemId: Long): Pair<Chat, ChatItem>? {
+  val c = withContext(Dispatchers.Main) { zfChatOfItem(itemId) } ?: return null
+  val res = zfGetChatQuiet(c.remoteHostId, c.chatInfo.apiId, ChatPagination.Around(itemId, 3), "") ?: return null
+  val item = res.first.chatItems.firstOrNull { it.id == itemId } ?: return null
+  return Pair(res.first, item)
+}
+
+/** Deja al día en el Feed el mensaje de un archivo ya descargado (para guardarlo o compartirlo sin reabrir la app). */
+private suspend fun zfStoreFresh(rh: Long?, itemId: Long) {
+  val r = zfFetchItem(itemId) ?: return
+  val e = zfEventOf(rh, r.first.chatInfo, r.second) ?: return
+  withContext(Dispatchers.Main) {
+    zfPut(e)
+    zfBump()
+  }
+}
+
+private fun zfIsTerminalError(s: CIFileStatus): Boolean =
+  s is CIFileStatus.RcvError || s is CIFileStatus.RcvAborted || s is CIFileStatus.RcvCancelled
+
+private class ZfDlState(val rh: Long?, val file: CIFile?, val itemId: Long) {
   var downloading by mutableStateOf(false)
   var slow by mutableStateOf(false)
+  var failed by mutableStateOf(false)
+  var percent by mutableStateOf(-1)
   var byUser by mutableStateOf(false)
+  var cur: CIFile? = file          // última versión conocida del archivo (con su ruta local cuando existe)
+  var requestedAt = 0L
   var retried = false
   var autoTried = false
 
   /** Pide el archivo con un toque (también sirve para reintentar). */
   fun request() {
-    val f = file ?: return
+    val f = cur ?: file ?: return
     byUser = true
     downloading = true
     slow = false
+    failed = false
     retried = false
-    zfDlStarted[zfDlKey(rh, f)] = System.currentTimeMillis()
+    requestedAt = System.currentTimeMillis()
+    zfDlStarted[zfDlKey(rh, f)] = requestedAt
     withLongRunningApi { zfReceive(rh, f, false) }
   }
 
   /** Segundo intento silencioso si la descarga pedida con un toque se queda parada. */
   fun resend() {
-    val f = file ?: return
+    val f = cur ?: file ?: return
     if (retried) return
     retried = true
     withLongRunningApi { zfReceive(rh, f, true) }
@@ -2036,23 +2196,20 @@ private class ZfDlState(val rh: Long?, val file: CIFile?) {
     if (zfReady.containsKey(key) || zfDlStarted.containsKey(key)) return
     zfDlStarted[key] = System.currentTimeMillis()
     downloading = true
-    val probe = zfProbeOf(f)
     withLongRunningApi {
       zfDlGate.acquire()
       try {
         zfReceive(rh, f, true)
-        // el turno se libera cuando el archivo termina (o a los 3 minutos)
+        // el turno se libera cuando el núcleo dice que terminó (o falló), o a los 3 minutos
         var n = 0
-        while (n < 180) {
-          delay(1000)
-          val done = withContext(Dispatchers.IO) {
-            try {
-              getLoadedFilePath(probe) != null
-            } catch (e: Exception) {
-              false
-            }
+        while (n < 120) {
+          delay(1500)
+          val s = try {
+            zfFetchItem(itemId)?.second?.file?.fileStatus
+          } catch (e: Exception) {
+            null
           }
-          if (done) break
+          if (s is CIFileStatus.RcvComplete || (s != null && zfIsTerminalError(s))) break
           n++
         }
       } finally {
@@ -2067,12 +2224,14 @@ private class ZfDlState(val rh: Long?, val file: CIFile?) {
  * autoKind: 2 / 3 para permitir la descarga automática de ese tipo (0 = no).
  */
 private suspend fun zfWaitFile(st: ZfDlState, autoKind: Int, check: suspend (CIFile) -> Boolean): CIFile? {
-  val file = st.file ?: return null
-  val probe = zfProbeOf(file)
-  val key = zfDlKey(st.rh, file)
-  val inProgress = file.fileStatus is CIFileStatus.RcvAccepted || file.fileStatus is CIFileStatus.RcvTransfer
+  val file0 = st.file ?: return null
+  val key = zfDlKey(st.rh, file0)
   var waited = 0L
+  var tick = 0
+  var lastSig = ""
+  var lastChange = System.currentTimeMillis()
   while (true) {
+    val probe = zfProbeOf(st.cur ?: file0)
     val ok = withContext(Dispatchers.IO) {
       try {
         check(probe)
@@ -2085,17 +2244,50 @@ private suspend fun zfWaitFile(st: ZfDlState, autoKind: Int, check: suspend (CIF
       zfReady[key] = true
       st.downloading = false
       st.slow = false
+      st.failed = false
+      st.percent = -1
+      if (file0.fileSource == null) {
+        try {
+          zfStoreFresh(st.rh, st.itemId)
+        } catch (e: Exception) {
+          Log.e(TAG, "zetaria feed store fresh: " + e.stackTraceToString())
+        }
+      }
       return probe
     }
     if (autoKind != 0) st.maybeAuto(autoKind)
     val now = System.currentTimeMillis()
     val startedAt = zfDlStarted[key]
     if (startedAt != null && now - startedAt > ZF_DL_GIVEUP_MS) zfDlStarted.remove(key)
-    val active = zfDlStarted[key]
-    st.downloading = active != null || inProgress
-    st.slow = (active != null && now - active > ZF_DL_SLOW_MS) || (active == null && inProgress && waited > ZF_DL_SLOW_MS)
+    // estado real según el núcleo: ruta local, progreso y errores
+    val known = (st.cur ?: file0).fileStatus
+    if (!known.sent && (zfDlStarted.containsKey(key) || known is CIFileStatus.RcvAccepted || known is CIFileStatus.RcvTransfer || tick % 4 == 0)) {
+      val fresh = try {
+        withContext(Dispatchers.IO) { zfFetchItem(st.itemId)?.second?.file }
+      } catch (e: Exception) {
+        null
+      }
+      if (fresh != null) st.cur = fresh
+    }
+    val s = (st.cur ?: file0).fileStatus
+    val pct = if (s is CIFileStatus.RcvTransfer && s.rcvTotal > 0L) ((s.rcvProgress * 100L) / s.rcvTotal).toInt().coerceIn(0, 100) else -1
+    val inProgress = s is CIFileStatus.RcvAccepted || s is CIFileStatus.RcvTransfer
+    val terminal = zfIsTerminalError(s)
+    val justTapped = now - st.requestedAt < 6000L
+    val failedNow = terminal && !justTapped
+    if (failedNow) zfDlStarted.remove(key)
+    st.failed = failedNow
+    st.percent = pct
+    st.downloading = !failedNow && (zfDlStarted.containsKey(key) || inProgress || (terminal && justTapped))
+    val sig = s.javaClass.simpleName + ":" + pct
+    if (sig != lastSig) {
+      lastSig = sig
+      lastChange = now
+    }
+    st.slow = st.downloading && now - lastChange > ZF_DL_SLOW_MS
     if (st.slow && st.byUser) st.resend()
-    val step = if (!st.downloading) 3000L else if (waited < 10_000L) 700L else if (waited < 120_000L) 1500L else 4000L
+    tick++
+    val step = if (!st.downloading) 3000L else if (waited < 20_000L) 800L else if (waited < 120_000L) 1500L else 3000L
     delay(step)
     waited += step
   }
@@ -2103,8 +2295,9 @@ private suspend fun zfWaitFile(st: ZfDlState, autoKind: Int, check: suspend (CIF
 
 private fun zfDlText(st: ZfDlState, what: String): String {
   val size = st.file?.fileSize ?: 0L
-  return if (st.slow) "Tarda mucho · toca para reintentar"
-  else if (st.downloading) "Descargando " + what + "…"
+  return if (st.failed) "No se pudo descargar · toca para reintentar"
+  else if (st.slow) "Tarda mucho · toca para reintentar"
+  else if (st.downloading) "Descargando " + what + "…" + (if (st.percent >= 0) " " + st.percent + "%" else "")
   else "⬇ Descargar " + what + (if (size > 0L) " (" + zfSizeText(size) + ")" else "")
 }
 
@@ -2140,7 +2333,7 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
   }
   val durationSec = (mc as? MsgContent.MCVideo)?.duration ?: 0
   val file = ci.file
-  val st = remember(ci.id) { ZfDlState(rh, file) }
+  val st = remember(ci.id) { ZfDlState(rh, file, ci.id) }
   var full by remember(ci.id) { mutableStateOf<ImageBitmap?>(null) }
   var loadedFile by remember(ci.id) { mutableStateOf<CIFile?>(if (isVideo) zfKnownReady(rh, file) else null) }
   val previewBmp = remember(previewStr) {
@@ -2221,7 +2414,7 @@ private fun ZfMedia(ci: ChatItem, rh: Long?, compact: Boolean) {
 @Composable
 private fun ZfFile(ci: ChatItem, rh: Long?) {
   val file = ci.file ?: return
-  val st = remember(ci.id) { ZfDlState(rh, file) }
+  val st = remember(ci.id) { ZfDlState(rh, file, ci.id) }
   var loadedFile by remember(ci.id) { mutableStateOf<CIFile?>(zfKnownReady(rh, file)) }
   LaunchedEffect(ci.id) {
     loadedFile = zfWaitFile(st, 0) { probe -> getLoadedFilePath(probe) != null }
@@ -2358,7 +2551,7 @@ private fun ZfAudioPlayer(file: CIFile, title: String, autoPlay: Boolean) {
 @Composable
 private fun ZfAudio(ci: ChatItem, rh: Long?) {
   val file = ci.file ?: return
-  val st = remember(ci.id) { ZfDlState(rh, file) }
+  val st = remember(ci.id) { ZfDlState(rh, file, ci.id) }
   var loadedFile by remember(ci.id) { mutableStateOf<CIFile?>(zfKnownReady(rh, file)) }
   LaunchedEffect(ci.id) {
     loadedFile = zfWaitFile(st, 3) { probe -> getLoadedFilePath(probe) != null }
