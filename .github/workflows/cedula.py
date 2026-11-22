@@ -5,9 +5,13 @@ En Ajustes > Dirección, el botón del nombre de SimpleX pasa a ser el de la cé
   - ID único aleatorio (ZET-XXXX-XXXX-XXXX-XXXX-XXXX) que se genera una sola vez al instalar la app y no cambia.
     Vive en un archivo interno (zetaria_id) de la carpeta de la base de datos y en los ajustes de la app, así que
     viaja con la exportación/importación de la base de datos.
-  - La cédula reúne nombre de perfil + foto de perfil + QR de la dirección de SimpleX + ID.
-  - «Renovar cédula» vuelve a tomar nombre, foto y enlace actuales; el ID se queda igual.
+  - Cédula HORIZONTAL con bandera: nombre, foto de perfil, el mismo QR de la dirección Zetaria, ID y datos básicos
+    (fecha de nacimiento/edad, estado civil, profesión, trabajo, ciudad) que se piden al crearla.
+  - El ID se muestra como texto copiable bajo la cédula.
+  - «Renovar cédula» vuelve a tomar nombre, foto, enlace y datos; el ID se queda igual.
   - «Compartir cédula» genera una imagen PNG de la cédula.
+  - Al emitirla se añade una línea a la descripción del perfil (ID y, si se quiere, datos): así los contactos ven el ID
+    y un botón «Ver cédula» en la ficha de cada contacto (también sin cédula: «Sin cédula de Zetaria»).
 
 Además: los archivos internos zetaria_* no cuentan ni se borran en «Archivos y multimedia» (para no perder el ID).
 
@@ -77,8 +81,7 @@ block = (
     "              painterResource(MR.images.ic_qr_code),\n"
     "              ZetariaCedula.buttonLabel(),\n"
     "              click = {\n"
-    "                val zetariaLink = userAddress.connLinkContact.simplexChatUri(short = userAddress.connLinkContact.connShortLink != null)\n"
-    "                ModalManager.start.showModal(cardScreen = true) { ZetariaCedulaView(user, zetariaLink) }\n"
+    "                ModalManager.start.showModal(cardScreen = true) { ZetariaCedulaView(user, userAddress.connLinkContact) }\n"
     "              },\n"
     "              iconColor = MaterialTheme.colors.secondary\n"
     "            )\n"
@@ -111,6 +114,24 @@ if hook_path.exists():
 if not hook_done:
     print("   [cedula] aviso: no encontré el punto de arranque; el ID se creará al abrir la cédula (sigue siendo único y permanente)")
 
+# 3b) Ficha del contacto: ID visible y botón «Ver cédula»
+rel = f"commonMain/{K}/views/chat/ChatInfoView.kt"
+p = read(src / rel, rel)
+once(p, "import chat.simplex.res.MR\n",
+     "import chat.simplex.res.MR\nimport chat.simplex.common.views.zetaria.ZetariaContactSection\n",
+     "import de ZetariaContactSection")
+once(p, "    LocalAliasEditor(chat.id, localAlias, updateValue = onLocalAliasChanged)\n\n    SectionDividerSpaced()\n",
+     "    LocalAliasEditor(chat.id, localAlias, updateValue = onLocalAliasChanged)\n\n    SectionDividerSpaced()\n\n    ZetariaContactSection(contact)\n",
+     "sección de cédula en la ficha del contacto")
+
+# 3c) Bandera del reino (recurso de imagen)
+flag = here / "branding" / "zetaria_flag.png"
+if not flag.exists():
+    die(f"falta {flag}")
+img_dir = src / "commonMain/resources/MR/images"
+if not img_dir.exists():
+    die("no existe la carpeta de imágenes MR/images")
+
 # 4) Archivos nuevos
 d = f"{K}/views/zetaria"
 new_files = {
@@ -126,4 +147,5 @@ for pth, txt in edits.items():
 for pth, txt in new_files.items():
     pth.parent.mkdir(parents=True, exist_ok=True)
     pth.write_text(txt, encoding="utf-8")
+(img_dir / "zet_flag.png").write_bytes(flag.read_bytes())
 print(f"   [cedula] listo: {sum(1 for q in edits if edits[q] != orig[q])} archivos modificados, {len(new_files)} nuevos")
