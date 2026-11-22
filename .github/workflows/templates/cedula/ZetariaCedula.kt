@@ -262,10 +262,13 @@ private fun zQr(link: String, small: Boolean): ImageBitmap =
 /** Imagen de la cédula (horizontal) lista para mostrar y compartir; la dibuja cada plataforma. */
 expect fun zetariaCedulaImage(card: ZetariaCedulaCard): ImageBitmap
 
+/** La bandera del reino (recurso drawable de Android; en escritorio no hay). */
+expect fun zetariaFlagImage(): ImageBitmap?
+
 private fun renderCard(name: String, image: String?, link: String?, small: Boolean, info: ZetariaCedulaInfo, issued: String): ImageBitmap {
   val photo = if (!image.isNullOrEmpty()) base64ToBitmap(image) else null
   val qr = if (!link.isNullOrEmpty()) zQr(link, small) else null
-  val flag = try { MR.images.zet_flag.toComposeImageBitmap() } catch (e: Throwable) { null }
+  val flag = try { zetariaFlagImage() } catch (e: Throwable) { null }
   return zetariaCedulaImage(
     ZetariaCedulaCard(name, photo, qr, info.id, info.birth, ZetariaCedula.ageOf(info.birth), info.civil, info.profession, info.work, info.city, issued, flag)
   )

@@ -6,6 +6,9 @@ import android.text.TextUtils
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.graphics.drawable.toBitmap
+import chat.simplex.common.R
+import chat.simplex.common.platform.androidAppContext
 
 // Dibuja la cédula horizontal (1200 x 756, proporción de tarjeta) como en una cédula electrónica:
 // franja superior, bandera, título e ID en la cabecera, datos a la izquierda, foto y QR a la derecha,
@@ -141,3 +144,10 @@ actual fun zetariaCedulaImage(card: ZetariaCedulaCard): ImageBitmap {
 
   return bmp.asImageBitmap()
 }
+
+actual fun zetariaFlagImage(): ImageBitmap? =
+  try {
+    androidAppContext.resources.getDrawable(R.drawable.zet_flag, null).toBitmap().asImageBitmap()
+  } catch (e: Throwable) {
+    null
+  }
