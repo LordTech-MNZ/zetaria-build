@@ -124,13 +124,20 @@ once(p, "    LocalAliasEditor(chat.id, localAlias, updateValue = onLocalAliasCha
      "    LocalAliasEditor(chat.id, localAlias, updateValue = onLocalAliasChanged)\n\n    SectionDividerSpaced()\n\n    ZetariaContactSection(contact)\n",
      "sección de cédula en la ficha del contacto")
 
-# 3c) Bandera del reino (recurso de imagen)
+# 3c) Bandera del reino: drawable de Android (como el logo de los QR), junto al icono original
 flag = here / "branding" / "zetaria_flag.png"
 if not flag.exists():
     die(f"falta {flag}")
-img_dir = src / "commonMain/resources/MR/images"
-if not img_dir.exists():
-    die("no existe la carpeta de imágenes MR/images")
+res_root = None
+for f in sorted(mp.rglob("icon_foreground_android_common.*"),
+                key=lambda f: (0 if f.relative_to(mp).parts[0] == "common" else 1, str(f))):
+    parts = f.parts
+    if "res" in parts:
+        i = len(parts) - 1 - parts[::-1].index("res")
+        res_root = pathlib.Path(*parts[:i + 1])
+        break
+if res_root is None:
+    die("no encuentro la carpeta res donde vive icon_foreground_android_common")
 
 # 4) Archivos nuevos
 d = f"{K}/views/zetaria"
@@ -147,5 +154,6 @@ for pth, txt in edits.items():
 for pth, txt in new_files.items():
     pth.parent.mkdir(parents=True, exist_ok=True)
     pth.write_text(txt, encoding="utf-8")
-(img_dir / "zet_flag.png").write_bytes(flag.read_bytes())
+(res_root / "drawable-nodpi").mkdir(parents=True, exist_ok=True)
+(res_root / "drawable-nodpi" / "zet_flag.png").write_bytes(flag.read_bytes())
 print(f"   [cedula] listo: {sum(1 for q in edits if edits[q] != orig[q])} archivos modificados, {len(new_files)} nuevos")
