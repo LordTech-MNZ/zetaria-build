@@ -469,14 +469,14 @@ object ZetariaAuthority {
   }
 
   private fun noticeTitle(s: ZetariaEdict): String = when (s.type) {
-    "BAN", "WIPE" -> "Baneado del Reino de Zetaria"
-    "MUTE" -> "Silenciado en el Reino de Zetaria"
-    else -> "Restricción en el Reino de Zetaria"
+    "BAN", "WIPE" -> "Baneado del Reino Soberano de Zetaria"
+    "MUTE" -> "Silenciado en el Reino Soberano de Zetaria"
+    else -> "Restringido en el Reino Soberano de Zetaria"
   }
 
   private fun noticeText(s: ZetariaEdict): String {
     val until = if (s.expires == 0L) "sin fecha de fin" else "hasta " + java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault()).format(java.util.Date(s.expires * 1000L))
-    return "La Autoridad de Zetaria impuso esta sanción (" + until + ").\nMotivo: " + s.reason.ifEmpty { "no indicado" } + "\nID del edicto: " + s.id
+    return "El Rey Supremo de Zetaria te impuso esta sanción (" + until + ").\nMotivo: " + s.reason.ifEmpty { "no indicado" } + "\nID del edicto: " + s.id
   }
 
   /** Avisa de la sanción vigente y, si la Autoridad ordenó borrar los datos (y esta compilación lo permite), los borra. */
@@ -485,9 +485,9 @@ object ZetariaAuthority {
     val s = mySanction() ?: return
     if (s.type == "WIPE" && wipeAllowed()) {
       AlertManager.shared.showAlertMsg(
-        title = "Sanción grave del Reino de Zetaria",
-        text = "La Autoridad ordenó borrar los datos de esta app.\nMotivo: " + s.reason.ifEmpty { "no indicado" } + "\nID del edicto: " + s.id,
-        confirmText = "Entendido, borrar",
+        title = "Sanción grave del Reino Soberano de Zetaria",
+        text = "El Rey Supremo ordenó borrar los datos de tu app.\nMotivo: " + s.reason.ifEmpty { "no indicado" } + "\nID del edicto: " + s.id,
+        confirmText = "Entendido su majestad, borrar",
         onConfirm = { wipeAll() }
       )
     } else if (lastNoticeId != s.id) {
