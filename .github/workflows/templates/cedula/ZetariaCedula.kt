@@ -53,7 +53,11 @@ private fun ztC(es: String, en: String): String =
 private const val LINE_MARK = "🪪 "
 private const val EMPTY = "-"
 
-class ZetariaCedulaInfo(val id: String, val birth: String, val civil: String, val profession: String, val work: String, val city: String)
+/** Lo que un perfil publica: siempre el ID; los datos y `created` solo si ya creó su cédula. */
+class ZetariaCedulaInfo(
+  val id: String, val birth: String, val civil: String, val profession: String, val work: String, val city: String,
+  val sex: String = "", val created: Boolean = true
+)
 
 /** Todo lo que dibuja la cédula (la imagen la dibuja cada plataforma). */
 class ZetariaCedulaCard(
@@ -67,6 +71,7 @@ class ZetariaCedulaCard(
   val profession: String,
   val work: String,
   val city: String,
+  val sex: String,
   val issued: String,
   val flag: ImageBitmap?
 )
@@ -180,7 +185,7 @@ object ZetariaCedula {
     val issued = when_.toLongOrNull()?.let { df.format(java.util.Date(it)) } ?: ""
     return ZetariaSnapshot(
       get("name", userId), get("image", userId), get("link", userId), get("small", userId) == "1",
-      ZetariaCedulaInfo(id(), get("birth", userId), get("civil", userId), get("profession", userId), get("work", userId), get("city", userId)),
+      ZetariaCedulaInfo(id(), get("birth", userId), get("civil", userId), get("profession", userId), get("work", userId), get("city", userId), get("sex", userId), true),
       issued
     )
   }
@@ -188,7 +193,7 @@ object ZetariaCedula {
   /** Emite la cédula de ESTE perfil (o la renueva): guarda datos, nombre, foto y enlace actuales. El ID no se toca. */
   fun issue(
     user: User, link: String, small: Boolean,
-    birth: String, civil: String, profession: String, work: String, city: String
+    birth: String, civil: String, profession: String, work: String, city: String, sex: String
   ) {
     id()
     val uid = user.userId
@@ -203,6 +208,7 @@ object ZetariaCedula {
     put("profession", uid, clean(profession))
     put("work", uid, clean(work))
     put("city", uid, clean(city))
+    put("sex", uid, clean(sex))
     if (first) {
       put("issued", uid, now)
       put("renewals", uid, "0")
@@ -222,7 +228,7 @@ object ZetariaCedula {
   // Zetaria la OCULTA en todas partes (ficha del contacto, descripción, editor de perfil) y la vuelve a poner sola,
   // así que dentro de Zetaria no se puede borrar. Solo se ve con otros clientes de SimpleX.
   private fun buildLine(info: ZetariaCedulaInfo): String =
-    LINE_MARK + listOf(info.id, info.birth, info.civil, info.profession, info.work, info.city)
+    LINE_MARK + (listOf(info.id, info.birth, info.civil, info.profession, info.work, info.city, info.sex) + (if (info.created) "C" else ""))
       .joinToString(" | ") { if (it.isBlank()) EMPTY else clean(it) }
 
   private fun isLine(l: String) = l.startsWith(LINE_MARK + "ZET-")
@@ -246,14 +252,19 @@ object ZetariaCedula {
     val id = parts.firstOrNull() ?: return null
     if (!ID_RX.matches(id)) return null
     fun p(i: Int): String = parts.getOrElse(i) { "" }.let { if (it == EMPTY) "" else it }
-    return ZetariaCedulaInfo(id, p(1), p(2), p(3), p(4), p(5))
+    // formato anterior (6 partes): solo lo escribían perfiles con cédula; el actual (8 partes) marca con «C» la cédula creada
+    val created = if (parts.size <= 6) true else p(7) == "C"
+    return ZetariaCedulaInfo(id, p(1), p(2), p(3), p(4), p(5), p(6), created)
   }
 
-  /** Escribe (o actualiza) la línea en el perfil; SimpleX la envía a los contactos. Solo si el perfil tiene cédula. */
+  /**
+   * Escribe (o actualiza) la línea en el perfil; SimpleX la envía a los contactos. El ID se publica SIEMPRE, haya o no
+   * cédula (el ID nace al instalar la app); los datos de la cédula, solo cuando el perfil ya la creó.
+   */
   fun publish(user: User?) {
     if (user == null) return
-    val snap = snapshot(user.userId) ?: return
-    val line = buildLine(snap.info)
+    val info = snapshot(user.userId)?.info ?: ZetariaCedulaInfo(id(), "", "", "", "", "", "", false)
+    val line = buildLine(info)
     withBGApi {
       try {
         val profile = user.profile.toProfile()
@@ -289,7 +300,23 @@ private fun renderCard(name: String, image: String?, link: String?, small: Boole
   val qr = if (!link.isNullOrEmpty()) zQr(link, small) else null
   val flag = try { zetariaFlagImage() } catch (e: Throwable) { null }
   return zetariaCedulaImage(
-    ZetariaCedulaCard(name, photo, qr, info.id, info.birth, ZetariaCedula.ageOf(info.birth), info.civil, info.profession, info.work, info.city, issued, flag)
+    ZetariaCedulaCard(name, photo, qr, info.id, info.birth, ZetariaCedula.ageOf(info.birth), info.civil, info.profession, info.work, info.city, info.sex, issued, flag)
+  )
+}
+
+/** Guarda la imagen en la galería, en la carpeta «Identificación Zetaria». */
+expect fun zetariaSaveToGallery(img: ImageBitmap, fileName: String): Boolean
+
+private suspend fun saveCardToGallery(img: ImageBitmap, id: String) {
+  val ok = try {
+    withContext(Dispatchers.IO) { zetariaSaveToGallery(img, "Cedula_Zetaria_${id.removePrefix("ZET-")}_${System.currentTimeMillis()}.png") }
+  } catch (e: Throwable) {
+    Log.e(TAG, "ZetariaCedula gallery error: ${e.stackTraceToString()}")
+    false
+  }
+  showToast(
+    if (ok) ztC("Guardada en la galería, carpeta «Identificación Zetaria»", "Saved to gallery, folder «Identificación Zetaria»")
+    else ztC("No se pudo guardar en la galería", "Could not save to gallery")
   )
 }
 
@@ -339,8 +366,8 @@ fun ZetariaCedulaView(user: User?, connLink: CreatedConnLink) {
   val editing = remember { mutableStateOf(ZetariaCedula.snapshot(user.userId) == null) }
   val id = remember(version.value) { ZetariaCedula.id() }
   val scope = rememberCoroutineScope()
-  // si el perfil ya tiene cédula, se asegura de que su ID esté publicado en el perfil
-  LaunchedEffect(Unit) { if (ZetariaCedula.hasCedula(user.userId)) ZetariaCedula.publish(user) }
+  // se asegura de que el ID esté publicado en el perfil
+  LaunchedEffect(Unit) { ZetariaCedula.publish(user) }
 
   ColumnWithScrollBar {
     AppBarTitle(ztC("Cédula de Zetaria", "Zetaria card"))
@@ -349,8 +376,8 @@ fun ZetariaCedulaView(user: User?, connLink: CreatedConnLink) {
         CedulaForm(
           snap = snap,
           onCancel = { editing.value = false },
-          onSubmit = { birth, civil, profession, work, city ->
-            ZetariaCedula.issue(user, liveUri, short, birth, civil, profession, work, city)
+          onSubmit = { birth, civil, profession, work, city, sex ->
+            ZetariaCedula.issue(user, liveUri, short, birth, civil, profession, work, city, sex)
             version.value = version.value + 1
             editing.value = false
           }
@@ -377,6 +404,10 @@ fun ZetariaCedulaView(user: User?, connLink: CreatedConnLink) {
         Spacer(Modifier.height(DEFAULT_PADDING_HALF))
         OutlinedButton(onClick = { scope.launch { shareCardImage(img) } }, modifier = Modifier.fillMaxWidth()) {
           Text(ztC("Compartir cédula (imagen)", "Share card (image)"))
+        }
+        Spacer(Modifier.height(DEFAULT_PADDING_HALF))
+        OutlinedButton(onClick = { scope.launch { saveCardToGallery(img, id) } }, modifier = Modifier.fillMaxWidth()) {
+          Text(ztC("Guardar en la galería", "Save to gallery"))
         }
         Spacer(Modifier.height(DEFAULT_PADDING_HALF))
         Text(
@@ -410,13 +441,14 @@ private fun CedChip(text: String, on: Boolean, click: () -> Unit) {
 private fun CedulaForm(
   snap: ZetariaSnapshot?,
   onCancel: () -> Unit,
-  onSubmit: (String, String, String, String, String) -> Unit
+  onSubmit: (String, String, String, String, String, String) -> Unit
 ) {
   val birth = remember { mutableStateOf(snap?.info?.birth ?: "") }
   val civil = remember { mutableStateOf(snap?.info?.civil ?: "") }
   val profession = remember { mutableStateOf(snap?.info?.profession ?: "") }
   val work = remember { mutableStateOf(snap?.info?.work ?: "") }
   val city = remember { mutableStateOf(snap?.info?.city ?: "") }
+  val sex = remember { mutableStateOf(snap?.info?.sex ?: "") }
   val birthOk = ZetariaCedula.validBirth(birth.value)
   val civilOptions = listOf(ztC("Soltero/a", "Single"), ztC("Casado/a", "Married"), ztC("Unión libre", "Partnered"), ztC("Divorciado/a", "Divorced"), ztC("Viudo/a", "Widowed"))
 
@@ -448,6 +480,12 @@ private fun CedulaForm(
       civilOptions.forEach { o -> CedChip(o, civil.value == o) { civil.value = if (civil.value == o) "" else o } }
     }
     Spacer(Modifier.height(DEFAULT_PADDING_HALF))
+    Text(ztC("Sexo", "Sex"), style = MaterialTheme.typography.body2, color = MaterialTheme.colors.secondary)
+    Spacer(Modifier.height(4.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      listOf(ztC("Masculino", "Male"), ztC("Femenino", "Female")).forEach { o -> CedChip(o, sex.value == o) { sex.value = if (sex.value == o) "" else o } }
+    }
+    Spacer(Modifier.height(DEFAULT_PADDING_HALF))
     OutlinedTextField(
       value = profession.value, onValueChange = { profession.value = it.take(60) },
       label = { Text(ztC("Profesión", "Profession")) }, singleLine = true, modifier = Modifier.fillMaxWidth()
@@ -464,7 +502,7 @@ private fun CedulaForm(
     )
     Spacer(Modifier.height(DEFAULT_PADDING))
     Button(
-      onClick = { onSubmit(birth.value, civil.value, profession.value, work.value, city.value) },
+      onClick = { onSubmit(birth.value, civil.value, profession.value, work.value, city.value, sex.value) },
       enabled = birthOk,
       modifier = Modifier.fillMaxWidth()
     ) {
@@ -482,15 +520,15 @@ private fun CedulaForm(
 
 // ------------------------------------------------------------------ ficha del contacto
 
-/** Sección «Cédula de Zetaria» en la ficha de un contacto: su ID (copiable) y el botón para ver su cédula. */
+/** Sección en la ficha de un contacto: su ID de Zetaria (siempre) y, si ya creó su cédula, el botón para verla. */
 @Composable
 fun ZetariaContactSection(contact: Contact) {
   val info = remember(contact.profile.description) { ZetariaCedula.parse(contact.profile.description) }
   val clipboard = LocalClipboardManager.current
-  SectionView(ztC("Cédula de Zetaria", "Zetaria card")) {
+  SectionView(ztC("Identificación de Zetaria", "Zetaria identification")) {
     if (info == null) {
       SectionItemView {
-        Text(ztC("Sin cédula de Zetaria", "No Zetaria card"), color = MaterialTheme.colors.secondary)
+        Text(ztC("Sin ID de Zetaria", "No Zetaria ID"), color = MaterialTheme.colors.secondary)
       }
     } else {
       SectionItemView(click = {
@@ -502,12 +540,14 @@ fun ZetariaContactSection(contact: Contact) {
           Text(info.id, fontWeight = FontWeight.Medium)
         }
       }
-      SettingsActionItem(
-        painterResource(MR.images.ic_qr_code),
-        ztC("Ver cédula", "View card"),
-        click = { ModalManager.end.showModal(cardScreen = true) { ZetariaContactCedulaView(contact) } },
-        iconColor = MaterialTheme.colors.secondary
-      )
+      if (info.created) {
+        SettingsActionItem(
+          painterResource(MR.images.ic_qr_code),
+          ztC("Ver cédula", "View card"),
+          click = { ModalManager.end.showModal(cardScreen = true) { ZetariaContactCedulaView(contact) } },
+          iconColor = MaterialTheme.colors.secondary
+        )
+      }
     }
   }
   SectionDividerSpaced()
@@ -520,8 +560,8 @@ fun ZetariaContactCedulaView(contact: Contact) {
   ColumnWithScrollBar {
     AppBarTitle(ztC("Cédula de Zetaria", "Zetaria card"))
     Column(Modifier.padding(horizontal = DEFAULT_PADDING), horizontalAlignment = Alignment.CenterHorizontally) {
-      if (info == null) {
-        Text(ztC("Este contacto no tiene cédula de Zetaria.", "This contact has no Zetaria card."), color = MaterialTheme.colors.secondary)
+      if (info == null || !info.created) {
+        Text(ztC("Este contacto aún no creó su cédula de Zetaria.", "This contact has not created a Zetaria card yet."), color = MaterialTheme.colors.secondary)
       } else {
         val link = contact.profile.contactLink
         val img = remember(info.id, info.birth, info.civil, info.profession, info.work, info.city, contact.profile.image, link, contact.profile.displayName) {
@@ -536,6 +576,10 @@ fun ZetariaContactCedulaView(contact: Contact) {
         Spacer(Modifier.height(DEFAULT_PADDING_HALF))
         OutlinedButton(onClick = { scope.launch { shareCardImage(img) } }, modifier = Modifier.fillMaxWidth()) {
           Text(ztC("Compartir cédula (imagen)", "Share card (image)"))
+        }
+        Spacer(Modifier.height(DEFAULT_PADDING_HALF))
+        OutlinedButton(onClick = { scope.launch { saveCardToGallery(img, info.id) } }, modifier = Modifier.fillMaxWidth()) {
+          Text(ztC("Guardar en la galería", "Save to gallery"))
         }
       }
     }

@@ -1,6 +1,10 @@
 package chat.simplex.common.views.zetaria
 
+import android.content.ContentValues
 import android.graphics.*
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.text.TextPaint
 import android.text.TextUtils
 import androidx.compose.ui.graphics.ImageBitmap
@@ -9,6 +13,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.graphics.drawable.toBitmap
 import chat.simplex.common.R
 import chat.simplex.common.platform.androidAppContext
+import java.io.File
+import java.io.FileOutputStream
 
 // Dibuja la cédula horizontal (1200 x 756, proporción de tarjeta) como en una cédula electrónica:
 // franja superior, bandera, título e ID en la cabecera, datos a la izquierda, foto y QR a la derecha,
@@ -91,6 +97,7 @@ actual fun zetariaCedulaImage(card: ZetariaCedulaCard): ImageBitmap {
   field("Trabajo", card.work, 50f, 502f, 360f)
   field("Ciudad", card.city, 440f, 502f, 390f)
   field("Emitida", card.issued, 50f, 586f, 360f)
+  field("Sexo", card.sex, 440f, 586f, 390f)
 
   // columna derecha: QR arriba (más grande) y foto cuadrada debajo (más grande), ambos opacos
   val cx = 1005f
@@ -135,4 +142,40 @@ actual fun zetariaFlagImage(): ImageBitmap? =
     androidAppContext.resources.getDrawable(R.drawable.zet_flag, null).toBitmap().asImageBitmap()
   } catch (e: Throwable) {
     null
+  }
+
+private const val GALLERY_FOLDER = "Identificación Zetaria"
+
+actual fun zetariaSaveToGallery(img: ImageBitmap, fileName: String): Boolean =
+  try {
+    val bitmap = img.asAndroidBitmap()
+    val resolver = androidAppContext.contentResolver
+    if (Build.VERSION.SDK_INT >= 29) {
+      val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/" + GALLERY_FOLDER)
+        put(MediaStore.Images.Media.IS_PENDING, 1)
+      }
+      val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+      if (uri == null) {
+        false
+      } else {
+        val ok = resolver.openOutputStream(uri)?.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) } ?: false
+        val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+        resolver.update(uri, done, null, null)
+        if (!ok) resolver.delete(uri, null, null)
+        ok
+      }
+    } else {
+      // Android 8 a 9: carpeta pública Pictures/Identificación Zetaria (puede requerir el permiso de almacenamiento)
+      val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), GALLERY_FOLDER)
+      dir.mkdirs()
+      val f = File(dir, fileName)
+      val ok = FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+      if (ok) android.media.MediaScannerConnection.scanFile(androidAppContext, arrayOf(f.absolutePath), arrayOf("image/png"), null)
+      ok
+    }
+  } catch (e: Throwable) {
+    false
   }

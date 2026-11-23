@@ -11,8 +11,10 @@ En Ajustes > Dirección, el botón del nombre de SimpleX pasa a ser el de la cé
   - «Renovar cédula» vuelve a tomar nombre, foto, enlace y datos; el ID se queda igual.
   - «Compartir cédula» genera una imagen PNG de la cédula.
   - La cédula es POR PERFIL (cada perfil tiene la suya); el ID es el de la instalación.
-  - Al emitirla se guarda una línea OCULTA en la descripción del perfil (ID + datos): los contactos ven el ID y un botón
-    «Ver cédula» en su ficha (sin cédula: «Sin cédula de Zetaria»). Zetaria oculta esa línea en la descripción y en el
+  - El ID se publica SIEMPRE en cada perfil (aunque no tenga cédula) mediante una línea OCULTA en la descripción del
+    perfil; si el perfil ya creó su cédula, la línea lleva también los datos. Los contactos ven el ID y, si hay cédula,
+    el botón «Ver cédula» en su ficha (sin ID: «Sin ID de Zetaria»).
+  - «Guardar en la galería» deja la cédula en Imágenes/Identificación Zetaria. Zetaria oculta esa línea en la descripción y en el
     editor de perfil, y no se puede borrar desde Zetaria.
 
 Además: los archivos internos zetaria_* no cuentan ni se borran en «Archivos y multimedia» (para no perder el ID).
@@ -142,6 +144,16 @@ once(p, '  val description = remember { mutableStateOf(profile.description ?: ""
 once(p, '            description.value.trim() == (profile.description ?: "") &&\n',
      f'            description.value.trim() == {Z}.stripLine(profile.description) &&\n',
      "comparación del editor sin la línea de cédula")
+
+# 3d) El ID se publica en cada perfil SIEMPRE (aunque no haya cédula): al abrir la lista de chats con ese perfil activo
+rel = f"commonMain/{K}/views/chatlist/ChatListView.kt"
+p = read(src / rel, rel)
+once(p, "  val oneHandUI = remember { appPrefs.oneHandUI.state }\n\n  LaunchedEffect(Unit) {\n    val showWhatsNew",
+     "  val oneHandUI = remember { appPrefs.oneHandUI.state }\n\n"
+     "  val zetariaUser = chatModel.currentUser.value\n"
+     f"  LaunchedEffect(zetariaUser?.userId) {{ {Z}.publish(zetariaUser) }}\n\n"
+     "  LaunchedEffect(Unit) {\n    val showWhatsNew",
+     "el ID se publica en el perfil activo aunque no tenga cédula")
 
 # 3c) Bandera del reino: drawable de Android (como el logo de los QR), junto al icono original
 flag = here / "branding" / "zetaria_flag.png"

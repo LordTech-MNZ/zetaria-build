@@ -6,3 +6,5 @@ import androidx.compose.ui.graphics.ImageBitmap
 actual fun zetariaCedulaImage(card: ZetariaCedulaCard): ImageBitmap = card.qr ?: ImageBitmap(1, 1)
 
 actual fun zetariaFlagImage(): ImageBitmap? = null
+
+actual fun zetariaSaveToGallery(img: ImageBitmap, fileName: String): Boolean = false
