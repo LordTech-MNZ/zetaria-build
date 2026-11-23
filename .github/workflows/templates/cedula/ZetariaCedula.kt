@@ -178,6 +178,26 @@ object ZetariaCedula {
 
   fun validBirth(s: String): Boolean = s.isBlank() || ageOf(s) != null
 
+  // Estado civil según el sexo (se guarda en español, que es el idioma de la cédula)
+  private val CIVIL_M = listOf("Soltero", "Casado", "Unión libre", "Divorciado", "Viudo")
+  private val CIVIL_F = listOf("Soltera", "Casada", "Unión libre", "Divorciada", "Viuda")
+  private val CIVIL_OLD = listOf("Soltero/a", "Casado/a", "Unión libre", "Divorciado/a", "Viudo/a")
+  private val CIVIL_EN = listOf("Single", "Married", "Partnered", "Divorced", "Widowed")
+
+  fun civilOptions(sex: String): List<String> = if (sex == "Femenino") CIVIL_F else CIVIL_M
+
+  fun civilLabel(value: String): String {
+    val i = listOf(CIVIL_M, CIVIL_F, CIVIL_OLD).map { it.indexOf(value) }.firstOrNull { it >= 0 } ?: return value
+    return ztC(value, CIVIL_EN[i])
+  }
+
+  /** Pasa el estado civil elegido a la forma del sexo indicado (Soltero -> Soltera...); sin sexo, no hay estado civil. */
+  fun civilFor(civil: String, sex: String): String {
+    if (sex.isEmpty()) return ""
+    val i = listOf(CIVIL_M, CIVIL_F, CIVIL_OLD).map { it.indexOf(civil) }.firstOrNull { it >= 0 } ?: return civil
+    return civilOptions(sex)[i]
+  }
+
   fun snapshot(userId: Long): ZetariaSnapshot? {
     if (!hasCedula(userId)) return null
     val df = java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM)
@@ -450,7 +470,6 @@ private fun CedulaForm(
   val city = remember { mutableStateOf(snap?.info?.city ?: "") }
   val sex = remember { mutableStateOf(snap?.info?.sex ?: "") }
   val birthOk = ZetariaCedula.validBirth(birth.value)
-  val civilOptions = listOf(ztC("Soltero/a", "Single"), ztC("Casado/a", "Married"), ztC("Unión libre", "Partnered"), ztC("Divorciado/a", "Divorced"), ztC("Viudo/a", "Widowed"))
 
   Column(Modifier.fillMaxWidth()) {
     Text(
@@ -474,16 +493,28 @@ private fun CedulaForm(
       Text(ztC("Edad: ${ZetariaCedula.ageOf(birth.value)} años (se calcula sola)", "Age: ${ZetariaCedula.ageOf(birth.value)} (calculated automatically)"), color = MaterialTheme.colors.secondary, style = MaterialTheme.typography.body2)
     }
     Spacer(Modifier.height(DEFAULT_PADDING_HALF))
-    Text(ztC("Estado civil", "Marital status"), style = MaterialTheme.typography.body2, color = MaterialTheme.colors.secondary)
-    Spacer(Modifier.height(4.dp))
-    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      civilOptions.forEach { o -> CedChip(o, civil.value == o) { civil.value = if (civil.value == o) "" else o } }
-    }
-    Spacer(Modifier.height(DEFAULT_PADDING_HALF))
     Text(ztC("Sexo", "Sex"), style = MaterialTheme.typography.body2, color = MaterialTheme.colors.secondary)
     Spacer(Modifier.height(4.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      listOf(ztC("Masculino", "Male"), ztC("Femenino", "Female")).forEach { o -> CedChip(o, sex.value == o) { sex.value = if (sex.value == o) "" else o } }
+      listOf("Masculino" to ztC("Masculino", "Male"), "Femenino" to ztC("Femenino", "Female")).forEach { (v, label) ->
+        CedChip(label, sex.value == v) {
+          val newSex = if (sex.value == v) "" else v
+          civil.value = ZetariaCedula.civilFor(civil.value, newSex) // Soltero <-> Soltera, etc.
+          sex.value = newSex
+        }
+      }
+    }
+    Spacer(Modifier.height(DEFAULT_PADDING_HALF))
+    Text(ztC("Estado civil", "Marital status"), style = MaterialTheme.typography.body2, color = MaterialTheme.colors.secondary)
+    Spacer(Modifier.height(4.dp))
+    if (sex.value.isEmpty()) {
+      Text(ztC("Elige primero el sexo para ver las opciones.", "Choose sex first to see the options."), style = MaterialTheme.typography.body2, color = MaterialTheme.colors.secondary)
+    } else {
+      Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ZetariaCedula.civilOptions(sex.value).forEach { o ->
+          CedChip(ZetariaCedula.civilLabel(o), civil.value == o) { civil.value = if (civil.value == o) "" else o }
+        }
+      }
     }
     Spacer(Modifier.height(DEFAULT_PADDING_HALF))
     OutlinedTextField(
@@ -502,7 +533,7 @@ private fun CedulaForm(
     )
     Spacer(Modifier.height(DEFAULT_PADDING))
     Button(
-      onClick = { onSubmit(birth.value, civil.value, profession.value, work.value, city.value, sex.value) },
+      onClick = { onSubmit(birth.value, ZetariaCedula.civilFor(civil.value, sex.value), profession.value, work.value, city.value, sex.value) },
       enabled = birthOk,
       modifier = Modifier.fillMaxWidth()
     ) {
