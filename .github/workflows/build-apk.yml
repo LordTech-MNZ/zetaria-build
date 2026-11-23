@@ -230,7 +230,7 @@ jobs:
         if: ${{ vars.ZETARIA_FEED != 'off' }}
         continue-on-error: true
         env:
-          ZETARIA_AUTHORITY_PUBKEY: ${{ vars.ZETARIA_AUTHORITY_PUBKEY }}
+          ZETARIA_AUTHORITY_PUBKEY: ${{ vars.ZETARIA_AUTHORITY_PUBKEY || secrets.ZETARIA_AUTHORITY_PUBKEY }}
           ZETARIA_ALLOW_WIPE: ${{ vars.ZETARIA_ALLOW_WIPE }}
           ZETARIA_REPO: ${{ github.repository }}
         run: |

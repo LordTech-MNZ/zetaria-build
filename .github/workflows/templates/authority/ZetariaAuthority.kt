@@ -83,7 +83,7 @@ object ZetariaAuthority {
   private const val POLL_MS = 30L * 60L * 1000L
   private const val GOSSIP_MAX_AGE_S = 30L * 86400L
 
-  private val TYPES = setOf("BAN", "MUTE", "RESTRICT", "WIPE", "POST_REMOVE", "COMMENT_REMOVE", "LIFT")
+  private val TYPES = setOf("BAN", "MUTE", "RESTRICT", "WIPE", "POST_REMOVE", "COMMENT_REMOVE", "LIFT", "TITLE")
   private val USER_TYPES = setOf("BAN", "MUTE", "RESTRICT", "WIPE")
   private val ID_RX = Regex("^[A-Za-z0-9]{8,32}$")
   private val TARGET_RX = Regex("^[A-Za-z0-9_.\\-]{1,64}$")
@@ -101,6 +101,13 @@ object ZetariaAuthority {
 
   fun wipeAllowed(): Boolean = WIPE_FLAG == "on"
   fun pubkeyConfigured(): Boolean = pubKey() != null
+
+  /** null = la llave pública incrustada es válida; si no, explica qué pasa. */
+  fun pubkeyProblem(): String? = when {
+    pubKey() != null -> null
+    PUBKEY.startsWith("__") -> "Este APK no trae la llave pública: la variable ZETARIA_AUTHORITY_PUBKEY estaba vacía al compilar, o instalaste una compilación anterior a ponerla."
+    else -> "La llave pública incrustada está dañada (probablemente copiada incompleta). Cópiala de nuevo completa."
+  }
   fun builtInPubkey(): String = if (pubKey() != null) norm(PUBKEY) else ""
   fun hasVault(): Boolean = settings.getString(KEY_VAULT, "").isNotEmpty()
   fun isAuthority(): Boolean = unlocked != null
@@ -217,6 +224,12 @@ object ZetariaAuthority {
     if (!matchesBuiltIn(key)) return false
     unlocked = key
     revision.value += 1
+    try {
+      val mine = ZetariaCedula.id()
+      if (mine.isNotEmpty() && footerFor(mine).isEmpty()) issue("TITLE", mine, "MONARCA", 0, "Monarca fundador del Reino")
+    } catch (e: Exception) {
+      Log.e(TAG, "zetaria authority title: " + e.stackTraceToString())
+    }
     return true
   }
 
@@ -306,6 +319,7 @@ object ZetariaAuthority {
     "POST_REMOVE" -> "Publicación retirada"
     "COMMENT_REMOVE" -> "Comentario retirado"
     "LIFT" -> "Sanción levantada"
+    "TITLE" -> "Título honorífico"
     else -> t
   }
 
@@ -512,6 +526,17 @@ object ZetariaAuthority {
     }
   }
 
+  /**
+   * Texto del pie de la cédula de este ID. Solo existe un título si la Autoridad lo firmó (edicto TITLE), así que nadie
+   * puede ponérselo por su cuenta: la cédula de otra persona se dibuja en tu teléfono con TUS edictos verificados.
+   * Vacío = pie normal («CIUDADANO DEL REINO SOBERANO DE ZETARIA»).
+   */
+  fun footerFor(zid: String): String {
+    load()
+    val has = all().any { it.type == "TITLE" && it.target == zid && it.arg == "MONARCA" && active(it) }
+    return if (has) "MONARCA FUNDADOR DEL REINO SOBERANO DE ZETARIA" else ""
+  }
+
   fun hidesComment(pid: String, cid: String): Boolean =
     all().any { it.type == "COMMENT_REMOVE" && it.target == pid && it.arg == cid && active(it) }
 
@@ -570,6 +595,8 @@ fun ZetariaAuthorityView(m: ChatModel) {
             },
             fontWeight = FontWeight.SemiBold
           )
+          val problem = ZetariaAuthority.pubkeyProblem()
+          if (problem != null) Text(problem, fontSize = 12.sp, color = MaterialTheme.colors.error)
           if (ZetariaAuthority.pubkeyConfigured()) {
             Text("Llave pública del Reino:", fontSize = 12.sp, color = MaterialTheme.colors.secondary)
             Text(ZetariaAuthority.builtInPubkey().take(40) + "…", fontSize = 12.sp, color = MaterialTheme.colors.secondary)
@@ -597,7 +624,7 @@ fun ZetariaAuthorityView(m: ChatModel) {
         if (ZetariaAuthority.hasVault()) {
           SectionItemView({
             val ok = ZetariaAuthority.unlock(pass)
-            message = if (ok) "" else "Contraseña incorrecta, o esa llave no es la de la Autoridad de esta compilación."
+            message = if (ok) "" else (ZetariaAuthority.pubkeyProblem() ?: "Contraseña incorrecta, o esa llave no es la de la Autoridad de esta compilación.")
             if (ok) pass = ""
           }) { Text("Desbloquear", color = MaterialTheme.colors.primary) }
         }

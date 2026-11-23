@@ -14,6 +14,7 @@ Qué parcha en el código de SimpleX:
                           sancionados; botón ⚖ en cada publicación ajena (solo con la autoridad desbloqueada).
   3) SettingsView.kt   -> botón «Autoridad de Zetaria» en Configuración avanzada.
   4) SimplexApp.kt     -> arranque (carga edictos y consulta el repositorio). Opcional.
+  4b) Cédula: el pie dice «MONARCA FUNDADOR…» para quien tenga un edicto TITLE firmado; «CIUDADANO…» para los demás.
   5) Copia ZetariaAuthority.kt con la llave pública y el repositorio incrustados.
 
 Variables de entorno (las pone el workflow):
@@ -42,8 +43,20 @@ def die(msg):
     sys.exit(f"ERROR [authority] {msg}")
 
 
-if pub and not re.fullmatch(r"[A-Za-z0-9_\-+/=]{80,200}", pub):
-    die("ZETARIA_AUTHORITY_PUBKEY no parece una llave pública válida (cópiala completa desde la app)")
+pub = re.sub(r"[\s\"']", "", pub)  # espacios, saltos de línea y comillas pegadas por error
+if pub:
+    import base64
+    try:
+        raw = base64.urlsafe_b64decode(pub.replace("+", "-").replace("/", "_").rstrip("=") + "==")
+    except Exception:
+        raw = b""
+    if len(raw) != 91 or raw[:2] != b"\x30\x59":
+        print("::error::ZETARIA_AUTHORITY_PUBKEY no es una llave pública válida (debe decodificar a 91 bytes). "
+              f"Recibí {len(pub)} caracteres; la correcta tiene 122. Cópiala completa desde la app.")
+        die("ZETARIA_AUTHORITY_PUBKEY inválida")
+else:
+    print("::warning::ZETARIA_AUTHORITY_PUBKEY está VACÍA: este APK no podrá desbloquear la Autoridad. "
+          "Créala en Settings > Secrets and variables > Actions > pestaña VARIABLES (no Secrets).")
 if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
     die(f"ZETARIA_REPO inválido: {repo!r}")
 
@@ -74,6 +87,25 @@ if not feed_p.exists():
     die("falta el Feed (ZetariaFeed.kt): este paso va DESPUÉS de feed.py")
 if not ced_p.exists():
     die("falta la Cédula (ZetariaCedula.kt): este paso va DESPUÉS de cedula.py")
+
+# 0b) Título en el pie de la cédula (solo si lo firmó la Autoridad): MONARCA FUNDADOR en vez de CIUDADANO
+p = load(ced_p, "ZetariaCedula.kt")
+once(p,
+     "  val issued: String,\n  val flag: ImageBitmap?\n)\n",
+     "  val issued: String,\n  val flag: ImageBitmap?,\n  val footer: String = \"\"\n)\n",
+     "campo footer en la cédula")
+once(p,
+     "info.sex, issued, flag)\n",
+     f"info.sex, issued, flag, {Z}.footerFor(info.id))\n",
+     "la cédula pide su pie a la Autoridad")
+ced_android = mp / "common/src/androidMain" / K / "views/zetaria/ZetariaCedula.android.kt"
+p = load(ced_android, "ZetariaCedula.android.kt")
+once(p,
+     '  c.drawText("CIUDADANO DEL REINO SOBERANO DE ZETARIA", w / 2f, 739f, tp(25f, Color.WHITE, true, 0.1f, Paint.Align.CENTER))\n',
+     '  val footerText = card.footer.ifEmpty { "CIUDADANO DEL REINO SOBERANO DE ZETARIA" }\n'
+     '  val footerColor = if (card.footer.isEmpty()) Color.WHITE else 0xFFFFD54F.toInt()\n'
+     '  c.drawText(footerText, w / 2f, 739f, tp(25f, footerColor, true, 0.1f, Paint.Align.CENTER))\n',
+     "pie de la cédula: título o ciudadano")
 
 # 1) Envíos y mensajes entrantes
 p = load(base / K / "model/SimpleXAPI.kt", "SimpleXAPI.kt")
