@@ -10,6 +10,7 @@ on:
       - "docs/**"
       - ".github/workflows/dump-source.yml"
       - ".github/workflows/test-keystore.yml"
+      - "authority/**"
   workflow_dispatch:
     inputs:
       tag:
@@ -217,6 +218,23 @@ jobs:
         continue-on-error: true
         run: |
           SCRIPT=$(find overlay -name feed.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
+      - name: Autoridad de Zetaria (baneos, silencios, retirada de publicaciones; órdenes firmadas)
+        # Necesita Cédula y Feed. Transaccional (todo o nada): si no encaja, el build sigue sin autoridad.
+        # Variables de repositorio (Settings > Secrets and variables > Actions > Variables):
+        #   ZETARIA_AUTHORITY_PUBKEY = llave PÚBLICA que te muestra la app al crear la llave (NO es secreta)
+        #   ZETARIA_ALLOW_WIPE       = on  (opcional) permite edictos de borrado de datos; por defecto desactivado
+        # La llave PRIVADA no va en el repositorio ni en el APK: se queda cifrada en tu teléfono.
+        if: ${{ vars.ZETARIA_FEED != 'off' }}
+        continue-on-error: true
+        env:
+          ZETARIA_AUTHORITY_PUBKEY: ${{ vars.ZETARIA_AUTHORITY_PUBKEY }}
+          ZETARIA_ALLOW_WIPE: ${{ vars.ZETARIA_ALLOW_WIPE }}
+          ZETARIA_REPO: ${{ github.repository }}
+        run: |
+          SCRIPT=$(find overlay -name authority.py | head -1)
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
