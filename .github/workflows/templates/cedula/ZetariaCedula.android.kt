@@ -23,8 +23,12 @@ actual fun zetariaCedulaImage(card: ZetariaCedulaCard): ImageBitmap {
 
   val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
   val c = Canvas(bmp)
-  val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
   c.clipPath(Path().apply { addRoundRect(RectF(0f, 0f, w.toFloat(), h.toFloat()), 44f, 44f, Path.Direction.CW) })
+
+  // pinceles separados: así ningún cambio de color/transparencia afecta a las imágenes (foto y QR siempre opacos)
+  fun fill(color: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
+  fun stroke(color: Int, width: Float) = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.STROKE; strokeWidth = width }
+  val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
 
   fun tp(size: Float, color: Int, bold: Boolean, spacing: Float = 0f, align: Paint.Align = Paint.Align.LEFT) =
     TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -39,108 +43,89 @@ actual fun zetariaCedulaImage(card: ZetariaCedulaCard): ImageBitmap {
     TextUtils.ellipsize(s, paint, maxW, TextUtils.TruncateAt.END).toString()
 
   // fondo pastel
-  p.shader = LinearGradient(
-    0f, 0f, w.toFloat(), h.toFloat(),
-    intArrayOf(0xFFF3ECFF.toInt(), 0xFFFFFFFF.toInt(), 0xFFFFE9E9.toInt()), null, Shader.TileMode.CLAMP
-  )
-  c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
-  p.shader = null
+  c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), Paint().apply {
+    shader = LinearGradient(
+      0f, 0f, w.toFloat(), h.toFloat(),
+      intArrayOf(0xFFF3ECFF.toInt(), 0xFFFFFFFF.toInt(), 0xFFFFE9E9.toInt()), null, Shader.TileMode.CLAMP
+    )
+  })
 
-  // marca de agua: la bandera, muy tenue
+  // marca de agua: la bandera, muy tenue (solo ella es translúcida)
   card.flag?.let { f ->
-    p.alpha = 38
-    c.drawBitmap(f.asAndroidBitmap(), null, RectF(150f, 260f, 690f, 619f), p)
-    p.alpha = 255
+    c.drawBitmap(f.asAndroidBitmap(), null, RectF(190f, 262f, 730f, 621f), Paint(imagePaint).apply { alpha = 36 })
   }
 
-  // franja superior (rojo de la bandera + línea morada)
-  p.color = red
-  c.drawRect(0f, 0f, w.toFloat(), 34f, p)
-  p.color = purple
-  c.drawRect(0f, 34f, w.toFloat(), 40f, p)
+  // franja superior
+  c.drawRect(0f, 0f, w.toFloat(), 34f, fill(red))
+  c.drawRect(0f, 34f, w.toFloat(), 40f, fill(purple))
 
   // bandera + cabecera
   card.flag?.let { f ->
-    c.drawBitmap(f.asAndroidBitmap(), null, RectF(46f, 66f, 196f, 166f), p)
-    p.style = Paint.Style.STROKE
-    p.strokeWidth = 3f
-    p.color = ink
-    c.drawRect(46f, 66f, 196f, 166f, p)
-    p.style = Paint.Style.FILL
+    c.drawBitmap(f.asAndroidBitmap(), null, RectF(46f, 66f, 196f, 166f), imagePaint)
+    c.drawRect(46f, 66f, 196f, 166f, stroke(ink, 3f))
   }
   val hx = (220f + 1154f) / 2f
   c.drawText("REINO SOBERANO DE ZETARIA", hx, 106f, tp(44f, ink, true, 0.04f, Paint.Align.CENTER))
   c.drawText("CÉDULA DE IDENTIDAD", hx, 152f, tp(32f, purple, true, 0.08f, Paint.Align.CENTER))
-  c.drawText(fit(card.id, tp(34f, ink, false, 0.05f, Paint.Align.CENTER), 900f), hx, 198f, tp(34f, ink, false, 0.05f, Paint.Align.CENTER))
-  p.color = 0x33000000
-  c.drawRect(46f, 216f, 1154f, 219f, p)
+  val idPaint = tp(34f, ink, false, 0.05f, Paint.Align.CENTER)
+  c.drawText(fit(card.id, idPaint, 900f), hx, 198f, idPaint)
+  c.drawRect(46f, 216f, 1154f, 219f, fill(0x33000000))
 
-  // datos
-  val valuePaint = tp(36f, ink, true)
+  // datos (el texto se achica solo si no cabe, y si aun así no cabe se corta con «…»)
   fun field(label: String, value: String, x: Float, y: Float, maxW: Float) {
     c.drawText(label.uppercase(), x, y, tp(22f, muted, false, 0.08f))
-    c.drawText(fit(value.ifBlank { "—" }, valuePaint, maxW), x, y + 40f, valuePaint)
+    val v = value.ifBlank { "—" }
+    var size = 36f
+    var paint = tp(size, ink, true)
+    while (paint.measureText(v) > maxW && size > 26f) {
+      size -= 2f
+      paint = tp(size, ink, true)
+    }
+    c.drawText(fit(v, paint, maxW), x, y + 40f, paint)
   }
-  field("Nombre", card.name, 50f, 250f, 650f)
-  field("Fecha de nacimiento", card.birth, 50f, 334f, 310f)
-  field("Edad", card.age?.let { "$it años" } ?: "", 380f, 334f, 320f)
-  field("Estado civil", card.civil, 50f, 418f, 310f)
-  field("Profesión", card.profession, 380f, 418f, 320f)
-  field("Trabajo", card.work, 50f, 502f, 310f)
-  field("Ciudad", card.city, 380f, 502f, 320f)
-  field("Emitida", card.issued, 50f, 586f, 310f)
+  field("Nombre", card.name, 50f, 250f, 780f)
+  field("Fecha de nacimiento", card.birth, 50f, 334f, 360f)
+  field("Edad", card.age?.let { "$it años" } ?: "", 440f, 334f, 390f)
+  field("Estado civil", card.civil, 50f, 418f, 360f)
+  field("Profesión", card.profession, 440f, 418f, 390f)
+  field("Trabajo", card.work, 50f, 502f, 360f)
+  field("Ciudad", card.city, 440f, 502f, 390f)
+  field("Emitida", card.issued, 50f, 586f, 360f)
 
-  // foto
-  val photoRect = RectF(730f, 236f, 960f, 506f)
+  // columna derecha: QR arriba (más grande) y foto cuadrada debajo (más grande), ambos opacos
+  val cx = 1005f
+  val qrBox = RectF(cx - 100f, 228f, cx + 100f, 428f)
+  c.drawRoundRect(qrBox, 18f, 18f, fill(Color.WHITE))
+  c.drawRoundRect(qrBox, 18f, 18f, stroke(0x33000000, 2f))
+  val qr = card.qr
+  if (qr != null) {
+    c.drawBitmap(qr.asAndroidBitmap(), null, RectF(qrBox.left + 8f, qrBox.top + 8f, qrBox.right - 8f, qrBox.bottom - 8f), imagePaint)
+    c.drawText("DIRECCIÓN ZETARIA", cx, 452f, tp(17f, muted, false, 0.05f, Paint.Align.CENTER))
+  } else {
+    c.drawText("Sin enlace", cx, qrBox.centerY() + 8f, tp(22f, muted, false, 0f, Paint.Align.CENTER))
+  }
+
+  val photoRect = RectF(cx - 113f, 466f, cx + 113f, 692f)
   val photo = card.photo
   if (photo != null) {
     val src = photo.asAndroidBitmap()
-    val dstRatio = photoRect.width() / photoRect.height()
-    val srcRatio = src.width.toFloat() / src.height
-    val srcRect = if (srcRatio > dstRatio) {
-      val nw = (src.height * dstRatio).toInt()
-      Rect((src.width - nw) / 2, 0, (src.width + nw) / 2, src.height)
-    } else {
-      val nh = (src.width / dstRatio).toInt()
-      Rect(0, (src.height - nh) / 2, src.width, (src.height + nh) / 2)
-    }
+    // la foto de perfil ya es cuadrada: se dibuja entera; si no lo fuera, se centra el recorte cuadrado
+    val side = minOf(src.width, src.height)
+    val srcRect = Rect((src.width - side) / 2, (src.height - side) / 2, (src.width + side) / 2, (src.height + side) / 2)
     c.save()
-    c.clipPath(Path().apply { addRoundRect(photoRect, 20f, 20f, Path.Direction.CW) })
-    c.drawBitmap(src, srcRect, photoRect, p)
+    c.clipPath(Path().apply { addRoundRect(photoRect, 22f, 22f, Path.Direction.CW) })
+    c.drawBitmap(src, srcRect, photoRect, imagePaint)
     c.restore()
   } else {
-    p.color = 0x22000000
-    c.drawRoundRect(photoRect, 20f, 20f, p)
+    c.drawRoundRect(photoRect, 22f, 22f, fill(0x22000000))
     val initial = card.name.trim().firstOrNull()?.uppercase() ?: "Z"
     c.drawText(initial, photoRect.centerX(), photoRect.centerY() + 40f, tp(120f, muted, true, 0f, Paint.Align.CENTER))
   }
-  p.style = Paint.Style.STROKE
-  p.strokeWidth = 5f
-  p.color = purple
-  c.drawRoundRect(photoRect, 20f, 20f, p)
-  p.style = Paint.Style.FILL
-
-  // QR (el mismo de la dirección Zetaria)
-  val qrBox = RectF(980f, 236f, 1150f, 406f)
-  p.color = Color.WHITE
-  c.drawRoundRect(qrBox, 18f, 18f, p)
-  p.style = Paint.Style.STROKE
-  p.strokeWidth = 2f
-  p.color = 0x33000000
-  c.drawRoundRect(qrBox, 18f, 18f, p)
-  p.style = Paint.Style.FILL
-  val qr = card.qr
-  if (qr != null) {
-    c.drawBitmap(qr.asAndroidBitmap(), null, RectF(qrBox.left + 8f, qrBox.top + 8f, qrBox.right - 8f, qrBox.bottom - 8f), p)
-    c.drawText("DIRECCIÓN ZETARIA", qrBox.centerX(), qrBox.bottom + 30f, tp(17f, muted, false, 0.05f, Paint.Align.CENTER))
-  } else {
-    c.drawText("Sin enlace", qrBox.centerX(), qrBox.centerY() + 8f, tp(22f, muted, false, 0f, Paint.Align.CENTER))
-  }
+  c.drawRoundRect(photoRect, 22f, 22f, stroke(purple, 5f))
 
   // pie
-  p.color = purple
-  c.drawRect(0f, 690f, w.toFloat(), h.toFloat(), p)
-  c.drawText("CIUDADANO DEL REINO SOBERANO DE ZETARIA", w / 2f, 736f, tp(26f, Color.WHITE, true, 0.1f, Paint.Align.CENTER))
+  c.drawRect(0f, 704f, w.toFloat(), h.toFloat(), fill(purple))
+  c.drawText("CIUDADANO DEL REINO SOBERANO DE ZETARIA", w / 2f, 739f, tp(25f, Color.WHITE, true, 0.1f, Paint.Align.CENTER))
 
   return bmp.asImageBitmap()
 }

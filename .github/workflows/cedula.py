@@ -10,8 +10,10 @@ En Ajustes > Dirección, el botón del nombre de SimpleX pasa a ser el de la cé
   - El ID se muestra como texto copiable bajo la cédula.
   - «Renovar cédula» vuelve a tomar nombre, foto, enlace y datos; el ID se queda igual.
   - «Compartir cédula» genera una imagen PNG de la cédula.
-  - Al emitirla se añade una línea a la descripción del perfil (ID y, si se quiere, datos): así los contactos ven el ID
-    y un botón «Ver cédula» en la ficha de cada contacto (también sin cédula: «Sin cédula de Zetaria»).
+  - La cédula es POR PERFIL (cada perfil tiene la suya); el ID es el de la instalación.
+  - Al emitirla se guarda una línea OCULTA en la descripción del perfil (ID + datos): los contactos ven el ID y un botón
+    «Ver cédula» en su ficha (sin cédula: «Sin cédula de Zetaria»). Zetaria oculta esa línea en la descripción y en el
+    editor de perfil, y no se puede borrar desde Zetaria.
 
 Además: los archivos internos zetaria_* no cuentan ni se borran en «Archivos y multimedia» (para no perder el ID).
 
@@ -79,7 +81,7 @@ block = (
     "          SectionView {\n"
     "            SettingsActionItem(\n"
     "              painterResource(MR.images.ic_qr_code),\n"
-    "              ZetariaCedula.buttonLabel(),\n"
+    "              ZetariaCedula.buttonLabel(user),\n"
     "              click = {\n"
     "                ModalManager.start.showModal(cardScreen = true) { ZetariaCedulaView(user, userAddress.connLinkContact) }\n"
     "              },\n"
@@ -123,6 +125,23 @@ once(p, "import chat.simplex.res.MR\n",
 once(p, "    LocalAliasEditor(chat.id, localAlias, updateValue = onLocalAliasChanged)\n\n    SectionDividerSpaced()\n",
      "    LocalAliasEditor(chat.id, localAlias, updateValue = onLocalAliasChanged)\n\n    SectionDividerSpaced()\n\n    ZetariaContactSection(contact)\n",
      "sección de cédula en la ficha del contacto")
+
+# 3a) La línea de cédula queda oculta: no se ve en la descripción ni en el editor de perfil, y el editor la conserva
+Z = "chat.simplex.common.views.zetaria.ZetariaCedula"
+p = read(src / f"commonMain/{K}/views/chat/ChatInfoView.kt", "ChatInfoView.kt")
+once(p, "  val descr = description?.trim()?.ifEmpty { null }\n",
+     f"  val descr = {Z}.stripLine(description).trim().ifEmpty {{ null }}\n",
+     "descripción sin la línea de cédula")
+p = read(src / f"commonMain/{K}/views/usersettings/UserProfileView.kt", "UserProfileView.kt")
+once(p, "description = description.trim().ifEmpty { null }, image = image)",
+     f"description = {Z}.withLine(description, profile.description), image = image)",
+     "el editor conserva la línea de cédula al guardar")
+once(p, '  val description = remember { mutableStateOf(profile.description ?: "") }\n',
+     f'  val description = remember {{ mutableStateOf({Z}.stripLine(profile.description)) }}\n',
+     "el editor no muestra la línea de cédula")
+once(p, '            description.value.trim() == (profile.description ?: "") &&\n',
+     f'            description.value.trim() == {Z}.stripLine(profile.description) &&\n',
+     "comparación del editor sin la línea de cédula")
 
 # 3c) Bandera del reino: drawable de Android (como el logo de los QR), junto al icono original
 flag = here / "branding" / "zetaria_flag.png"

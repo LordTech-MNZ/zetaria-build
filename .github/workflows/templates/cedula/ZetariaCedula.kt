@@ -41,10 +41,11 @@ import java.security.SecureRandom
 //    interno (zetaria_id) de la carpeta de archivos de la base de datos y se copia en los ajustes de la app; así, si la
 //    persona exporta su base de datos y la importa en otro teléfono, ese archivo trae de vuelta el mismo ID.
 //  - La cédula es una «foto» de nombre + foto de perfil + QR de la dirección + datos básicos al emitirla/renovarla.
-//  - Para que los contactos vean el ID (y, si la persona quiere, sus datos) sin tocar el protocolo de SimpleX, al emitir
-//    la cédula se añade UNA línea al final de la descripción del perfil:
-//        🪪 ZET-XXXX-XXXX-XXXX-XXXX-XXXX | nacimiento | estado civil | profesión | trabajo | ciudad
-//    Es texto normal (cualquier SimpleX la ve) y Zetaria la lee en la ficha del contacto. Quien la borre deja de mostrarla.
+//  - La cédula es POR PERFIL: cada perfil de SimpleX tiene la suya (nombre, foto, QR de su dirección y datos básicos),
+//    pero todas comparten el mismo ID de la instalación.
+//  - Para que los contactos vean el ID y la cédula sin tocar el protocolo de SimpleX, al emitirla se guarda UNA línea
+//    en la descripción del perfil (🪪 ID | nacimiento | estado civil | profesión | trabajo | ciudad). Zetaria la oculta
+//    en todas partes, no se puede borrar desde Zetaria y se muestra solo como «ID» y botón «Ver cédula» en la ficha.
 
 private fun ztC(es: String, en: String): String =
   if (java.util.Locale.getDefault().language == "es") es else en
@@ -70,29 +71,31 @@ class ZetariaCedulaCard(
   val flag: ImageBitmap?
 )
 
+/** La cédula emitida por un perfil (foto de los datos al emitirla/renovarla). */
+class ZetariaSnapshot(
+  val name: String,
+  val image: String,
+  val link: String,
+  val small: Boolean,
+  val info: ZetariaCedulaInfo,
+  val issued: String
+)
+
 object ZetariaCedula {
   private val ID_RX = Regex("^ZET(-[0-9A-F]{4}){5}$")
   private const val MIRROR = "zetaria_id"
-
-  private fun strPref(key: String, default: String = "") = SharedPreference(
-    get = { settings.getString(key, default) },
-    set = { v: String -> settings.putString(key, v) }
+  private val idPref = SharedPreference(
+    get = { settings.getString("ZetariaCedulaId", "") },
+    set = { v: String -> settings.putString("ZetariaCedulaId", v) }
   )
 
-  private val idPref = strPref("ZetariaCedulaId")
-  val namePref = strPref("ZetariaCedulaName")
-  val imagePref = strPref("ZetariaCedulaImage")
-  val linkPref = strPref("ZetariaCedulaLink")
-  val smallPref = strPref("ZetariaCedulaQrSmall")
-  val issuedAt = strPref("ZetariaCedulaIssued")
-  val renewedAt = strPref("ZetariaCedulaRenewed")
-  val renewals = strPref("ZetariaCedulaRenewals")
-  val birthPref = strPref("ZetariaCedulaBirth")
-  val civilPref = strPref("ZetariaCedulaCivil")
-  val professionPref = strPref("ZetariaCedulaProfession")
-  val workPref = strPref("ZetariaCedulaWork")
-  val cityPref = strPref("ZetariaCedulaCity")
-  val sharePref = strPref("ZetariaCedulaShareData", "1")
+  /** Sube cada vez que se emite/renueva una cédula, para que los botones se actualicen solos. */
+  val revision = mutableStateOf(0)
+
+  // La cédula es POR PERFIL (cada perfil de SimpleX tiene la suya); el ID es el mismo para toda la instalación.
+  private fun key(field: String, userId: Long) = "ZetariaCedula_${field}_$userId"
+  private fun get(field: String, userId: Long): String = settings.getString(key(field, userId), "")
+  private fun put(field: String, userId: Long, v: String) { settings.putString(key(field, userId), v) }
 
   // ---------------------------------------------------------------- ID
   private fun generate(): String {
@@ -144,11 +147,13 @@ object ZetariaCedula {
     try { id() } catch (e: Throwable) { Log.e(TAG, "ZetariaCedula ensureId error: ${e.message}") }
   }
 
-  fun hasCedula(): Boolean = issuedAt.get().isNotEmpty()
+  fun hasCedula(userId: Long): Boolean = get("issued", userId).isNotEmpty()
 
-  fun buttonLabel(): String =
-    if (issuedAt.state.value.isNotEmpty()) ztC("Cédula del Reino Soberano de Zetaria", "Card of the Sovereign Kingdom of Zetaria")
+  fun buttonLabel(user: User?): String {
+    revision.value // suscribe el botón a los cambios
+    return if (user != null && hasCedula(user.userId)) ztC("Cédula del Reino Soberano de Zetaria", "Card of the Sovereign Kingdom of Zetaria")
     else ztC("Crear cédula del Reino Soberano de Zetaria", "Create card of the Sovereign Kingdom of Zetaria")
+  }
 
   // ---------------------------------------------------------------- datos
   private fun clean(s: String): String = s.replace('|', ' ').replace('\n', ' ').replace('\r', ' ').trim().take(60)
@@ -168,63 +173,75 @@ object ZetariaCedula {
 
   fun validBirth(s: String): Boolean = s.isBlank() || ageOf(s) != null
 
-  /** Emite la cédula (o la renueva): guarda datos, nombre, foto y enlace actuales. El ID no se toca. */
+  fun snapshot(userId: Long): ZetariaSnapshot? {
+    if (!hasCedula(userId)) return null
+    val df = java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM)
+    val when_ = get("renewed", userId).ifEmpty { get("issued", userId) }
+    val issued = when_.toLongOrNull()?.let { df.format(java.util.Date(it)) } ?: ""
+    return ZetariaSnapshot(
+      get("name", userId), get("image", userId), get("link", userId), get("small", userId) == "1",
+      ZetariaCedulaInfo(id(), get("birth", userId), get("civil", userId), get("profession", userId), get("work", userId), get("city", userId)),
+      issued
+    )
+  }
+
+  /** Emite la cédula de ESTE perfil (o la renueva): guarda datos, nombre, foto y enlace actuales. El ID no se toca. */
   fun issue(
-    user: User?, link: String, small: Boolean,
-    birth: String, civil: String, profession: String, work: String, city: String, share: Boolean
+    user: User, link: String, small: Boolean,
+    birth: String, civil: String, profession: String, work: String, city: String
   ) {
     id()
-    val first = issuedAt.get().isEmpty()
+    val uid = user.userId
+    val first = get("issued", uid).isEmpty()
     val now = System.currentTimeMillis().toString()
-    namePref.set(user?.profile?.displayName ?: "")
-    imagePref.set(user?.profile?.image ?: "")
-    linkPref.set(link)
-    smallPref.set(if (small) "1" else "0")
-    birthPref.set(clean(birth))
-    civilPref.set(clean(civil))
-    professionPref.set(clean(profession))
-    workPref.set(clean(work))
-    cityPref.set(clean(city))
-    sharePref.set(if (share) "1" else "0")
+    put("name", uid, user.profile.displayName)
+    put("image", uid, user.profile.image ?: "")
+    put("link", uid, link)
+    put("small", uid, if (small) "1" else "0")
+    put("birth", uid, clean(birth))
+    put("civil", uid, clean(civil))
+    put("profession", uid, clean(profession))
+    put("work", uid, clean(work))
+    put("city", uid, clean(city))
     if (first) {
-      issuedAt.set(now)
-      renewals.set("0")
+      put("issued", uid, now)
+      put("renewals", uid, "0")
     } else {
-      renewals.set(((renewals.get().toIntOrNull() ?: 0) + 1).toString())
+      put("renewals", uid, ((get("renewals", uid).toIntOrNull() ?: 0) + 1).toString())
     }
-    renewedAt.set(now)
+    put("renewed", uid, now)
+    revision.value = revision.value + 1
     publish(user)
   }
 
-  fun isOutdated(user: User?, link: String): Boolean =
-    namePref.get() != (user?.profile?.displayName ?: "") ||
-      imagePref.get() != (user?.profile?.image ?: "") ||
-      linkPref.get() != link
+  fun isOutdated(user: User, snap: ZetariaSnapshot, link: String): Boolean =
+    snap.name != user.profile.displayName || snap.image != (user.profile.image ?: "") || snap.link != link
 
-  fun myInfo(): ZetariaCedulaInfo =
-    ZetariaCedulaInfo(id(), birthPref.get(), civilPref.get(), professionPref.get(), workPref.get(), cityPref.get())
-
-  /** Fecha de la última emisión/renovación, p. ej. «21 nov. 2026» */
-  fun issuedText(): String {
-    val df = java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM)
-    val s = renewedAt.get().ifEmpty { issuedAt.get() }
-    return s.toLongOrNull()?.let { df.format(java.util.Date(it)) } ?: ""
-  }
-
-  // ---------------------------------------------------------------- línea en la descripción del perfil
-  private fun buildLine(info: ZetariaCedulaInfo, withData: Boolean): String =
-    if (!withData) LINE_MARK + info.id
-    else LINE_MARK + listOf(info.id, info.birth, info.civil, info.profession, info.work, info.city)
+  // ---------------------------------------------------------------- línea oculta en la descripción del perfil
+  // Es el «transporte» del ID y de los datos hacia los contactos (SimpleX no tiene un campo propio para esto).
+  // Zetaria la OCULTA en todas partes (ficha del contacto, descripción, editor de perfil) y la vuelve a poner sola,
+  // así que dentro de Zetaria no se puede borrar. Solo se ve con otros clientes de SimpleX.
+  private fun buildLine(info: ZetariaCedulaInfo): String =
+    LINE_MARK + listOf(info.id, info.birth, info.civil, info.profession, info.work, info.city)
       .joinToString(" | ") { if (it.isBlank()) EMPTY else clean(it) }
 
-  private fun mergeLine(description: String?, line: String): String {
-    val rest = (description ?: "").lines().filterNot { it.startsWith(LINE_MARK + "ZET-") }.joinToString("\n").trim()
-    return if (rest.isEmpty()) line else "$rest\n$line"
+  private fun isLine(l: String) = l.startsWith(LINE_MARK + "ZET-")
+
+  /** La descripción sin la línea de cédula (lo que la persona escribió y lo que se muestra). */
+  fun stripLine(description: String?): String =
+    (description ?: "").lines().filterNot { isLine(it) }.joinToString("\n").trim()
+
+  /** Descripción para guardar: el texto de la persona + la línea de cédula que ya tenía el perfil (si la tenía). */
+  fun withLine(text: String, existingDescription: String?): String? {
+    val line = (existingDescription ?: "").lines().firstOrNull { isLine(it) }
+    val t = text.trim()
+    val r = if (line == null) t else if (t.isEmpty()) line else "$t\n$line"
+    return r.ifEmpty { null }
   }
 
   /** Lee la línea de cédula de la descripción de un perfil (el propio o el de un contacto). */
   fun parse(description: String?): ZetariaCedulaInfo? {
-    val line = description?.lines()?.firstOrNull { it.startsWith(LINE_MARK + "ZET-") } ?: return null
+    val line = description?.lines()?.firstOrNull { isLine(it) } ?: return null
     val parts = line.removePrefix(LINE_MARK).split(" | ").map { it.trim() }
     val id = parts.firstOrNull() ?: return null
     if (!ID_RX.matches(id)) return null
@@ -232,14 +249,16 @@ object ZetariaCedula {
     return ZetariaCedulaInfo(id, p(1), p(2), p(3), p(4), p(5))
   }
 
-  /** Escribe (o actualiza) la línea de cédula en la descripción del perfil activo; SimpleX la envía a los contactos. */
+  /** Escribe (o actualiza) la línea en el perfil; SimpleX la envía a los contactos. Solo si el perfil tiene cédula. */
   fun publish(user: User?) {
     if (user == null) return
-    val line = buildLine(myInfo(), sharePref.get() != "0")
+    val snap = snapshot(user.userId) ?: return
+    val line = buildLine(snap.info)
     withBGApi {
       try {
         val profile = user.profile.toProfile()
-        val newDesc = mergeLine(profile.description, line)
+        val rest = stripLine(profile.description)
+        val newDesc = if (rest.isEmpty()) line else "$rest\n$line"
         if (newDesc != (profile.description ?: "")) {
           val updated = chatModel.controller.apiUpdateProfile(user.remoteHostId, profile.copy(description = newDesc))
           if (updated != null) chatModel.updateCurrentUser(user.remoteHostId, updated.first)
@@ -299,7 +318,7 @@ private fun IdBlock(id: String) {
   Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
     Text(ztC("ID de la cédula", "Card ID"), style = MaterialTheme.typography.body2, color = MaterialTheme.colors.secondary)
     SelectionContainer {
-      Text(id, fontSize = 20.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+      Text(id, fontSize = 16.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, softWrap = false)
     }
     TextButton(onClick = {
       clipboard.setText(AnnotatedString(id))
@@ -312,36 +331,35 @@ private fun IdBlock(id: String) {
 
 @Composable
 fun ZetariaCedulaView(user: User?, connLink: CreatedConnLink) {
+  if (user == null) return
   val short = connLink.connShortLink != null
   val liveUri = connLink.simplexChatUri(short)
   val version = remember { mutableStateOf(0) }
-  val issued = remember(version.value) { ZetariaCedula.hasCedula() }
-  val editing = remember { mutableStateOf(!ZetariaCedula.hasCedula()) }
+  val snap = remember(version.value) { ZetariaCedula.snapshot(user.userId) }
+  val editing = remember { mutableStateOf(ZetariaCedula.snapshot(user.userId) == null) }
   val id = remember(version.value) { ZetariaCedula.id() }
   val scope = rememberCoroutineScope()
+  // si el perfil ya tiene cédula, se asegura de que su ID esté publicado en el perfil
+  LaunchedEffect(Unit) { if (ZetariaCedula.hasCedula(user.userId)) ZetariaCedula.publish(user) }
 
   ColumnWithScrollBar {
     AppBarTitle(ztC("Cédula de Zetaria", "Zetaria card"))
     Column(Modifier.padding(horizontal = DEFAULT_PADDING), horizontalAlignment = Alignment.CenterHorizontally) {
-      if (editing.value) {
+      if (editing.value || snap == null) {
         CedulaForm(
-          issued = issued,
+          snap = snap,
           onCancel = { editing.value = false },
-          onSubmit = { birth, civil, profession, work, city, share ->
-            ZetariaCedula.issue(user, liveUri, short, birth, civil, profession, work, city, share)
+          onSubmit = { birth, civil, profession, work, city ->
+            ZetariaCedula.issue(user, liveUri, short, birth, civil, profession, work, city)
             version.value = version.value + 1
             editing.value = false
           }
         )
       } else {
-        val name = ZetariaCedula.namePref.get()
         val img = remember(version.value) {
-          renderCard(
-            name, ZetariaCedula.imagePref.get(), ZetariaCedula.linkPref.get(), ZetariaCedula.smallPref.get() == "1",
-            ZetariaCedula.myInfo(), ZetariaCedula.issuedText()
-          )
+          renderCard(snap.name, snap.image, snap.link, snap.small, snap.info, snap.issued)
         }
-        val outdated = ZetariaCedula.isOutdated(user, liveUri)
+        val outdated = ZetariaCedula.isOutdated(user, snap, liveUri)
         CardImage(img)
         Spacer(Modifier.height(DEFAULT_PADDING_HALF))
         IdBlock(id)
@@ -390,33 +408,32 @@ private fun CedChip(text: String, on: Boolean, click: () -> Unit) {
 
 @Composable
 private fun CedulaForm(
-  issued: Boolean,
+  snap: ZetariaSnapshot?,
   onCancel: () -> Unit,
-  onSubmit: (String, String, String, String, String, Boolean) -> Unit
+  onSubmit: (String, String, String, String, String) -> Unit
 ) {
-  val birth = remember { mutableStateOf(ZetariaCedula.birthPref.get()) }
-  val civil = remember { mutableStateOf(ZetariaCedula.civilPref.get()) }
-  val profession = remember { mutableStateOf(ZetariaCedula.professionPref.get()) }
-  val work = remember { mutableStateOf(ZetariaCedula.workPref.get()) }
-  val city = remember { mutableStateOf(ZetariaCedula.cityPref.get()) }
-  val share = remember { mutableStateOf(ZetariaCedula.sharePref.get() != "0") }
+  val birth = remember { mutableStateOf(snap?.info?.birth ?: "") }
+  val civil = remember { mutableStateOf(snap?.info?.civil ?: "") }
+  val profession = remember { mutableStateOf(snap?.info?.profession ?: "") }
+  val work = remember { mutableStateOf(snap?.info?.work ?: "") }
+  val city = remember { mutableStateOf(snap?.info?.city ?: "") }
   val birthOk = ZetariaCedula.validBirth(birth.value)
   val civilOptions = listOf(ztC("Soltero/a", "Single"), ztC("Casado/a", "Married"), ztC("Unión libre", "Partnered"), ztC("Divorciado/a", "Divorced"), ztC("Viudo/a", "Widowed"))
 
   Column(Modifier.fillMaxWidth()) {
     Text(
       ztC(
-        "Tu cédula reúne el nombre y la foto de tu perfil, el mismo QR de tu dirección Zetaria y tu ID, que se generó al instalar la app y nunca cambia. " +
-          "Estos datos son opcionales: aparecen en la cédula.",
-        "Your card gathers your profile name and photo, the same QR as your Zetaria address and your ID, which was generated when the app was installed and never changes. " +
-          "These details are optional: they appear on the card."
+        "Tu cédula reúne el nombre y la foto de este perfil, el mismo QR de tu dirección Zetaria y tu ID, que se generó al instalar la app y nunca cambia. " +
+          "Tu ID y estos datos los ven tus contactos en tu perfil, con el botón «Ver cédula». Deja vacío lo que no quieras mostrar.",
+        "Your card gathers this profile's name and photo, the same QR as your Zetaria address and your ID, which was generated when the app was installed and never changes. " +
+          "Your contacts see your ID and these details on your profile, with the «View card» button. Leave empty what you don't want to show."
       ),
       color = MaterialTheme.colors.secondary
     )
     Spacer(Modifier.height(DEFAULT_PADDING))
     OutlinedTextField(
       value = birth.value, onValueChange = { birth.value = it.take(10) },
-      label = { Text(ztC("Fecha de nacimiento (dd/mm/aaaa)", "Date of birth (dd/mm/yyyy)")) },
+      label = { Text(ztC("Nacimiento (dd/mm/aaaa)", "Birth (dd/mm/yyyy)")) },
       singleLine = true, isError = !birthOk, modifier = Modifier.fillMaxWidth()
     )
     if (!birthOk) {
@@ -446,31 +463,18 @@ private fun CedulaForm(
       label = { Text(ztC("Ciudad / lugar de residencia", "City / place of residence")) }, singleLine = true, modifier = Modifier.fillMaxWidth()
     )
     Spacer(Modifier.height(DEFAULT_PADDING))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Text(ztC("Mostrar mis datos en mi perfil", "Show my details on my profile"), Modifier.weight(1f))
-      Switch(checked = share.value, onCheckedChange = { share.value = it })
-    }
-    Text(
-      ztC(
-        "Tu ID siempre aparece en tu perfil para tus contactos. Con el interruptor activado, también ven los datos de arriba (se añade una línea a la descripción de tu perfil, que puedes borrar cuando quieras).",
-        "Your ID always appears on your profile for your contacts. With the switch on they also see the details above (a line is added to your profile description, which you can delete any time)."
-      ),
-      style = MaterialTheme.typography.body2,
-      color = MaterialTheme.colors.secondary
-    )
-    Spacer(Modifier.height(DEFAULT_PADDING))
     Button(
-      onClick = { onSubmit(birth.value, civil.value, profession.value, work.value, city.value, share.value) },
+      onClick = { onSubmit(birth.value, civil.value, profession.value, work.value, city.value) },
       enabled = birthOk,
       modifier = Modifier.fillMaxWidth()
     ) {
       Text(
-        if (issued) ztC("Renovar cédula", "Renew card")
+        if (snap != null) ztC("Renovar cédula", "Renew card")
         else ztC("Crear cédula del Reino Soberano de Zetaria", "Create card of the Sovereign Kingdom of Zetaria"),
         textAlign = TextAlign.Center
       )
     }
-    if (issued) {
+    if (snap != null) {
       TextButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text(ztC("Cancelar", "Cancel")) }
     }
   }
