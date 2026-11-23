@@ -1,0 +1,4 @@
+# Edictos firmados de la Autoridad de Zetaria. Una línea por edicto (lo que copia la app con
+# «Copiar todos los edictos»). Las líneas que empiezan con # se ignoran.
+# Cada app consulta este archivo cada 30 minutos y solo obedece líneas con firma válida de la Autoridad,
+# así que pegar aquí una línea falsa o alterada no sirve de nada.
