@@ -833,28 +833,37 @@ private suspend fun zfGetChatQuiet(rh: Long?, id: Long, pagination: ChatPaginati
   }
 }
 
-/** Devuelve true si se leyeron todos los chats sin errores. */
+/** Hasta cuántos chats se leen a la vez al construir el feed completo (no afecta la lista de Chats). */
+private val zfScanGate = Semaphore(4)
+
+/** Devuelve true si se leyeron todos los chats sin errores. Los lee en paralelo (hasta 4 a la vez) para que abrir el Feed sea más rápido. */
 private suspend fun zfRefresh(): Boolean {
   if (chatModel.chatRunning.value != true) return false
   if (!zfRefreshing.compareAndSet(false, true)) return false
   withContext(Dispatchers.Main) { zfLoading.value = true }
   var complete = false
   try {
-    var allRead = true
     val chats = withContext(Dispatchers.Main) { zfReadable() }
-    for (c in chats) {
-      val res = zfGetChatQuiet(c.remoteHostId, c.chatInfo.apiId, ChatPagination.Last(100), ZF_TOK)
-      if (res == null) {
-        allRead = false
-        continue
-      }
-      val chat = res.first
-      val list = ArrayList<ZfEvent>()
-      for (ci in chat.chatItems) {
-        val e = zfEventOf(c.remoteHostId, chat.chatInfo, ci)
-        if (e != null) list.add(e)
-      }
-      withContext(Dispatchers.Main) { zfSetChat(chat.chatInfo.id, list) }
+    val allRead = coroutineScope {
+      chats.map { c ->
+        async {
+          zfScanGate.acquire()
+          try {
+            val res = zfGetChatQuiet(c.remoteHostId, c.chatInfo.apiId, ChatPagination.Last(100), ZF_TOK)
+              ?: return@async false
+            val chat = res.first
+            val list = ArrayList<ZfEvent>()
+            for (ci in chat.chatItems) {
+              val e = zfEventOf(c.remoteHostId, chat.chatInfo, ci)
+              if (e != null) list.add(e)
+            }
+            withContext(Dispatchers.Main) { zfSetChat(chat.chatInfo.id, list) }
+            true
+          } finally {
+            zfScanGate.release()
+          }
+        }
+      }.awaitAll().all { it }
     }
     withContext(Dispatchers.Main) { zfInitSeen() }
     complete = allRead
@@ -1610,8 +1619,10 @@ fun zetariaPreviewChat(chat: Chat): Chat {
       }
     }
   }
-  val item = real?.item
-  return chat.copy(chatItems = if (item != null) arrayListOf(item) else arrayListOf<ChatItem>())
+  // Mientras se resuelve (o si de verdad no hay mensaje real, p. ej. solo hubo publicaciones), se muestra
+  // el chat tal cual en vez de dejar la fila sin mensaje: una fila vacía es peor que ver brevemente la publicación.
+  val item = real?.item ?: return chat
+  return chat.copy(chatItems = arrayListOf(item))
 }
 
 // ---------------------------------------------------------------------------
