@@ -238,6 +238,19 @@ jobs:
           echo "Usando: $SCRIPT"
           python3 "$SCRIPT" src/apps/multiplatform
 
+      - name: Ayuda sin rastros de SimpleX, «Sobre Zetaria», donaciones y documento PDF
+        # Va DESPUÉS de updater, support y authority. Transaccional (todo o nada): si no encaja, el build sigue con la ayuda original.
+        # Canal, correo y repositorio se cambian en ayuda.py (o con ZETARIA_NEWS_LINK / ZETARIA_SUPPORT_EMAIL).
+        continue-on-error: true
+        env:
+          ZETARIA_REPO: ${{ github.repository }}
+          ZETARIA_NEWS_LINK: ${{ vars.ZETARIA_NEWS_LINK }}
+          ZETARIA_SUPPORT_EMAIL: ${{ vars.ZETARIA_SUPPORT_EMAIL }}
+        run: |
+          SCRIPT=$(find overlay -name ayuda.py | head -1)
+          echo "Usando: $SCRIPT"
+          python3 "$SCRIPT" src/apps/multiplatform
+
       - name: Aviso de «Tu red» (servidores de SimpleX por ahora y normas de uso)
         # Transaccional (todo o nada): si no encaja con el código de SimpleX, el build sigue con el texto original.
         continue-on-error: true
