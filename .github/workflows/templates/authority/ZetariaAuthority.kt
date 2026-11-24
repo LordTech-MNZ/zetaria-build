@@ -98,6 +98,7 @@ object ZetariaAuthority {
   @Volatile private var unlocked: PrivateKey? = null
   @Volatile private var lastBlockedNoticeMs = 0L
   @Volatile private var lastNoticeId = ""
+  @Volatile private var wipeTriggered = false
 
   fun wipeAllowed(): Boolean = WIPE_FLAG == "on"
   fun pubkeyConfigured(): Boolean = pubKey() != null
@@ -479,17 +480,22 @@ object ZetariaAuthority {
     return "El Rey Supremo de Zetaria te impuso esta sanción (" + until + ").\nMotivo: " + s.reason.ifEmpty { "no indicado" } + "\nID del edicto: " + s.id
   }
 
-  /** Avisa de la sanción vigente y, si la Autoridad ordenó borrar los datos (y esta compilación lo permite), los borra. */
+  /**
+   * Avisa de la sanción vigente y, si la Autoridad ordenó borrar los datos (y esta compilación lo permite),
+   * los borra de inmediato: el aviso es solo informativo, no una confirmación. El borrado no depende de que
+   * la persona toque nada ni de que el aviso siga en pantalla; tocar fuera de él o cerrarlo no lo detiene.
+   */
   fun checkSelf() {
     if (unlocked != null) return
     val s = mySanction() ?: return
     if (s.type == "WIPE" && wipeAllowed()) {
+      if (wipeTriggered) return
+      wipeTriggered = true
       AlertManager.shared.showAlertMsg(
         title = "Sanción grave del Reino Soberano de Zetaria",
-        text = "El Rey Supremo ordenó borrar los datos de tu app.\nMotivo: " + s.reason.ifEmpty { "no indicado" } + "\nID del edicto: " + s.id,
-        confirmText = "Entendido su majestad, borrar",
-        onConfirm = { wipeAll() }
+        text = "El Rey Supremo ordenó borrar los datos de tu app.\nMotivo: " + s.reason.ifEmpty { "no indicado" } + "\nID del edicto: " + s.id
       )
+      wipeAll()
     } else if (lastNoticeId != s.id) {
       lastNoticeId = s.id
       AlertManager.shared.showAlertMsg(noticeTitle(s), noticeText(s))
