@@ -1521,9 +1521,11 @@ private suspend fun zfEnsureReal(chat: Chat): ZfReal {
   val item: ChatItem? = try {
     zfLastRealItem(chat)
   } catch (e: Exception) {
-    return ZfReal(null, chat.chatInfo.chatTs.toEpochMilliseconds(), false)
+    return ZfReal(null, 0L, false)
   }
-  val r = ZfReal(item, (item?.meta?.itemTs ?: chat.chatInfo.chatTs).toEpochMilliseconds(), true)
+  // Si nunca hubo un mensaje real (solo edictos o publicaciones), no se usa la hora de esa entrega
+  // invisible para ordenar: así el chat no sube de puesto solo porque le llegó algo oculto.
+  val r = ZfReal(item, item?.meta?.itemTs?.toEpochMilliseconds() ?: 0L, true)
   zfRealCache[key] = r
   return r
 }
@@ -1532,7 +1534,7 @@ private fun zfChatSortMs(chat: Chat): Long {
   val fl = zfFeedLast(chat)
   if (fl != null) {
     val r = zfRealCache[chat.id + ":" + fl.id]
-    return r?.tsMs ?: chat.chatInfo.chatTs.toEpochMilliseconds()
+    return r?.tsMs ?: 0L
   }
   return (chat.chatItems.lastOrNull()?.meta?.itemTs ?: chat.chatInfo.chatTs).toEpochMilliseconds()
 }
@@ -1619,10 +1621,11 @@ fun zetariaPreviewChat(chat: Chat): Chat {
       }
     }
   }
-  // Mientras se resuelve (o si de verdad no hay mensaje real, p. ej. solo hubo publicaciones), se muestra
-  // el chat tal cual en vez de dejar la fila sin mensaje: una fila vacía es peor que ver brevemente la publicación.
-  val item = real?.item ?: return chat
-  return chat.copy(chatItems = arrayListOf(item))
+  // Mientras se resuelve, o si de verdad no hubo nunca un mensaje real (solo edictos o publicaciones), la
+  // fila no muestra nada: mostrar el contenido oculto tal cual (un edicto, una publicación) sería peor que
+  // una fila sin mensaje, porque dejaría de ser invisible.
+  val item = real?.item
+  return chat.copy(chatItems = if (item != null) arrayListOf(item) else arrayListOf())
 }
 
 // ---------------------------------------------------------------------------
