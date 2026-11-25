@@ -21,7 +21,6 @@ import chat.simplex.common.model.*
 import chat.simplex.common.platform.*
 import chat.simplex.common.ui.theme.*
 import chat.simplex.common.views.helpers.*
-import chat.simplex.common.views.onboarding.SimpleXInfo
 import chat.simplex.common.views.usersettings.SettingsActionItem
 import chat.simplex.res.MR
 import dev.icerock.moko.resources.compose.painterResource
@@ -59,11 +58,6 @@ fun ZetariaAboutView(chatModel: ChatModel) {
     )
     Spacer(Modifier.height(DEFAULT_PADDING))
     SectionView {
-      SettingsActionItem(
-        painterResource(MR.images.ic_info),
-        "Ver la introducción",
-        { ModalManager.start.showModal { SimpleXInfo(chatModel, onboarding = false) } }
-      )
       SettingsActionItem(
         painterResource(MR.images.ic_github),
         "Código fuente de Zetaria",
@@ -116,6 +110,115 @@ fun ZetariaDonateView() {
 // ---------------------------------------------------------------------------------------------------------------
 // 3) Documento PDF del Reino
 // ---------------------------------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------------------------
+// 4) Novedades y guía de uso (lo que Zetaria tiene y SimpleX Chat no)
+// ---------------------------------------------------------------------------------------------------------------
+class ZetariaFeature(val icon: String, val title: String, val what: String, val how: String)
+
+object ZetariaFeatures {
+  val all = listOf(
+    ZetariaFeature("📰", "Feed de publicaciones",
+      "Publica texto, fotos, videos, audios y encuestas para la gente que tienes agregada, y mira lo que publican ellos, con reacciones y comentarios.",
+      "Toca la pestaña «Feed», junto a «Chats». Con el botón «Actualizar» se envían tus publicaciones anteriores a los contactos nuevos."),
+    ZetariaFeature("🪪", "Cédula del Reino Soberano de Zetaria",
+      "Un ID único (ZET-…) y una cédula con tu foto, tu QR y tus datos, que puedes compartir como imagen.",
+      "Ve a Ajustes > Dirección y abre la cédula. «Renovar cédula» actualiza tus datos; el ID nunca cambia."),
+    ZetariaFeature("🎧", "Audios en el chat",
+      "Envía audios (mp3, wav, m4a, ogg…) y escúchalos con un reproductor propio, con pausa y barra de avance.",
+      "En el chat toca el botón de adjuntar y elige «Archivo y audios»."),
+    ZetariaFeature("📊", "Encuestas",
+      "Crea encuestas en el chat; cada persona vota y la tarjeta muestra los resultados.",
+      "Botón de adjuntar > «Encuesta»."),
+    ZetariaFeature("🎨", "Stickers",
+      "Panel de stickers para enviar, guardar e importar los tuyos.",
+      "Botón de adjuntar > «Stickers»."),
+    ZetariaFeature("🎞️", "GIFs",
+      "Buscador de GIFs integrado para enviarlos sin salir del chat.",
+      "Botón de adjuntar > «GIFs». Si te pide una clave de KLIPY, pégala una sola vez dentro de la app."),
+    ZetariaFeature("🕵️", "Esteganografía y códigos",
+      "13 herramientas: ocultar mensajes y archivos dentro de imágenes y audios (cifrado AES-256), convertir imagen y audio entre sí, cifrado César, Morse, y QR y códigos de barras.",
+      "Botón de adjuntar > «Esteganografía». Elige una herramienta y sigue los pasos."),
+    ZetariaFeature("👥", "Roles de miembros",
+      "En los grupos puedes renombrar los roles y asignarlos a los miembros, y hasta ponerles un apodo de rol.",
+      "Abre la información del grupo y toca «Roles de miembros». Solo propietario, administrador y moderador pueden cambiarlos."),
+    ZetariaFeature("📞", "Llamadas grupales",
+      "Crea una sala de llamada con un toque y comparte el enlace en el grupo; quien lo toque entra a la llamada dentro de la app.",
+      "En un grupo, toca el botón de llamada de la barra superior (Android)."),
+    ZetariaFeature("💬", "Soporte de Zetaria",
+      "Un chat directo con el soporte del movimiento para preguntas y novedades.",
+      "Toca el botón de nuevo chat y elige «Soporte de Zetaria»."),
+    ZetariaFeature("⚖️", "Autoridad del Reino",
+      "La Autoridad puede restringir, silenciar o banear con un motivo visible. Cada orden va firmada y tu teléfono comprueba la firma antes de obedecerla.",
+      "Cualquiera puede ver el registro público en Configuración avanzada > «Autoridad de Zetaria»."),
+    ZetariaFeature("🔗", "Enlaces y QR de Zetaria",
+      "Los enlaces que compartes son de Zetaria, y los códigos QR son morados con el logo MNZ.",
+      "Se usan igual que siempre: añadir contacto, crear grupo y compartir enlace o QR."),
+    ZetariaFeature("📁", "Explorador de archivos",
+      "Mira qué archivos pesan más en tu teléfono y borra solo los que quieras, uno a uno.",
+      "Ajustes > Datos del chat > «Archivos y multimedia»."),
+    ZetariaFeature("🔄", "Actualizaciones automáticas",
+      "La app avisa cuando hay una versión nueva y la instala desde las Releases oficiales.",
+      "Configuración avanzada > «Buscar actualizaciones»."),
+    ZetariaFeature("📄", "Documento del Reino",
+      "La Autoridad puede publicar un PDF (por ejemplo, el Manifiesto) y se lee con un botón en Configuración.",
+      "Aparece en la sección «Zetaria» de Configuración cuando hay un documento publicado."),
+    ZetariaFeature("❤️", "Apoyar a Zetaria",
+      "Zetaria es gratuita. Si quieres, puedes hacer una donación voluntaria.",
+      "Configuración > sección «Zetaria» > «Apoyar a Zetaria (donar)»."),
+    ZetariaFeature("✨", "Interfaz fluida",
+      "Transiciones suaves entre pantallas, animación de arranque y nombres de chat y grupo completos en la barra superior.",
+      "No necesitas hacer nada: ya está activo.")
+  )
+}
+
+@Composable
+private fun ZetariaFeatureBlock(f: ZetariaFeature, withHow: Boolean) {
+  Column(Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING, vertical = DEFAULT_PADDING_HALF)) {
+    Text(f.icon + "  " + f.title, style = MaterialTheme.typography.h3, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(4.dp))
+    Text(f.what, lineHeight = 22.sp)
+    if (withHow) {
+      Spacer(Modifier.height(4.dp))
+      Text("Cómo usarlo: " + f.how, lineHeight = 22.sp, color = MaterialTheme.colors.secondary)
+    }
+  }
+}
+
+@Composable
+fun ZetariaNewsView() {
+  ColumnWithScrollBar {
+    AppBarTitle("Novedades de Zetaria")
+    Text(
+      "Lo que Zetaria tiene y SimpleX Chat no:",
+      modifier = Modifier.padding(horizontal = DEFAULT_PADDING),
+      color = MaterialTheme.colors.secondary
+    )
+    for (f in ZetariaFeatures.all) ZetariaFeatureBlock(f, withHow = false)
+    SectionBottomSpacer()
+  }
+}
+
+@Composable
+fun ZetariaGuideView() {
+  ColumnWithScrollBar {
+    AppBarTitle("Guía de uso")
+    Column(Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Text("Para empezar", style = MaterialTheme.typography.h2)
+      Text(
+        "Para iniciar un chat nuevo, toca el botón de añadir contacto y elige «Añadir contacto» (crea un enlace de invitación o usa uno recibido) " +
+          "o «Crear grupo». Si recibiste un enlace de Zetaria, ábrelo y toca «Conectar» en la app.",
+        lineHeight = 22.sp
+      )
+      Text("Zetaria funciona sobre la tecnología de SimpleX: mensajería privada, sin números de teléfono.", lineHeight = 22.sp, color = MaterialTheme.colors.secondary)
+      Spacer(Modifier.height(DEFAULT_PADDING_HALF))
+      Text("Funciones de Zetaria", style = MaterialTheme.typography.h2)
+    }
+    for (f in ZetariaFeatures.all) ZetariaFeatureBlock(f, withHow = true)
+    SectionBottomSpacer()
+  }
+}
+
+// ZETARIA_DOC_BEGIN
 object ZetariaDocs {
   private const val MAX_BYTES = 25 * 1024 * 1024
 
@@ -300,3 +403,4 @@ fun ZetariaDocView() {
     SectionBottomSpacer()
   }
 }
+// ZETARIA_DOC_END

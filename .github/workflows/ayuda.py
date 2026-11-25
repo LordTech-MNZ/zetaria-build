@@ -3,6 +3,7 @@
 
 Qué hace (todo o nada: si algo no encaja con el código de SimpleX, termina con error y no toca nada):
   1) Ayuda y asistencia
+       - «Guía de uso» y «Novedades» muestran las funciones de Zetaria (ZetariaFeatures en ZetariaAyuda.kt)
        - «Seguir SimpleX Network News»  -> canal oficial «Fuerza Nacional Zetaria - FNZ»
        - «Contacta vía email»           -> movimientonacionalzetario369@gmail.com
        - «Contribuye» y «Califica en GitHub» -> repositorio de Zetaria
@@ -99,6 +100,11 @@ sub(SV, "      if (appPlatform.isAndroid) {\n        RateAppItem(uriHandler)\n  
 sub(SV, "showModal { SimpleXInfo(it, onboarding = false) }",
     "showModal { chat.simplex.common.views.zetaria.ZetariaAboutView(it) }", "«Sobre Zetaria» con la imagen de la Capitanía")
 
+sub(SV, "showModal { HelpView(userDisplayName) }",
+    "showModal { chat.simplex.common.views.zetaria.ZetariaGuideView() }", "«Guía de uso» con las funciones de Zetaria")
+sub(SV, "showCustomModal { _, close -> WhatsNewView(viaSettings = true, close = close) }",
+    "showModal { chat.simplex.common.views.zetaria.ZetariaNewsView() }", "«Novedades» con las novedades de Zetaria")
+
 # 2) Configuración: sección «Zetaria» ----------------------------------------------------------------------
 have_authority = (K / "views/zetaria/ZetariaAuthority.kt").exists() and '"DOC"' in (K / "views/zetaria/ZetariaAuthority.kt").read_text(encoding="utf-8")
 doc_item = "      chat.simplex.common.views.zetaria.ZetariaManifestoItem()\n" if have_authority else ""
@@ -130,6 +136,10 @@ for f in sorted(RES.glob("*/strings.xml")):
     for key, (esp, en) in TXT.items():
         pat = re.compile(r'(<string\b[^>]*\bname="' + key + r'"[^>]*>)(.*?)(</string>)', re.S)
         new = pat.sub(lambda m: m.group(1) + (esp if es else en) + m.group(3), new)
+    if es:
+        for key, (esp, en) in TXT.items():
+            if f'name="{key}"' not in new:  # el español de SimpleX no traduce esta clave: se añade
+                new = new.replace("</resources>", f'  <string name="{key}">{esp}</string>\n</resources>')
     if new != t:
         changes[f] = new
         nstr += 1
@@ -149,6 +159,10 @@ tpl = here / "templates/ayuda/ZetariaAyuda.kt"
 if not tpl.exists():
     fail(f"falta la plantilla {tpl}")
 kt = tpl.read_text(encoding="utf-8").replace("__ZETARIA_REPO_URL__", repo_url)
+if not have_authority:
+    # Sin Autoridad con soporte de documentos (plantilla vieja o paso fallido): se quita todo el código del PDF
+    kt = re.sub(r"// ZETARIA_DOC_BEGIN.*?// ZETARIA_DOC_END\n", "", kt, flags=re.S)
+    print("   [ayuda] código del PDF omitido (la Autoridad no soporta documentos)")
 if "__ZETARIA_" in kt:
     fail("marcadores sin sustituir en ZetariaAyuda.kt")
 changes[K / "views/zetaria/ZetariaAyuda.kt"] = kt
