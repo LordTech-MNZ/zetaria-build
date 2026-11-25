@@ -83,7 +83,7 @@ object ZetariaAuthority {
   private const val POLL_MS = 30L * 60L * 1000L
   private const val GOSSIP_MAX_AGE_S = 30L * 86400L
 
-  private val TYPES = setOf("BAN", "MUTE", "RESTRICT", "WIPE", "POST_REMOVE", "COMMENT_REMOVE", "LIFT", "TITLE")
+  private val TYPES = setOf("BAN", "MUTE", "RESTRICT", "WIPE", "POST_REMOVE", "COMMENT_REMOVE", "LIFT", "TITLE", "DOC")
   private val USER_TYPES = setOf("BAN", "MUTE", "RESTRICT", "WIPE")
   private val ID_RX = Regex("^[A-Za-z0-9]{8,32}$")
   private val TARGET_RX = Regex("^[A-Za-z0-9_.\\-]{1,64}$")
@@ -321,6 +321,7 @@ object ZetariaAuthority {
     "COMMENT_REMOVE" -> "Comentario retirado"
     "LIFT" -> "Sanción levantada"
     "TITLE" -> "Título honorífico"
+    "DOC" -> "Documento PDF"
     else -> t
   }
 
@@ -542,6 +543,16 @@ object ZetariaAuthority {
     val has = all().any { it.type == "TITLE" && it.target == zid && it.arg == "MONARCA" && active(it) }
     return if (has) "MONARCA FUNDADOR DEL REINO SOBERANO DE ZETARIA" else ""
   }
+
+  /**
+   * Documento PDF vigente (botón de Configuración). Lo fija la Autoridad con un edicto DOC firmado:
+   *   target = SHA-256 del PDF (64 hex), reason = texto del botón. Gana el más reciente que siga vigente.
+   * El PDF se descarga de authority/manifiesto.pdf del repositorio y SOLO se abre si su SHA-256 coincide con el del edicto,
+   * así que nadie puede cambiar el documento tocando el repositorio sin la llave de la Autoridad.
+   */
+  fun currentDoc(): ZetariaEdict? = all().firstOrNull { it.type == "DOC" && active(it) && it.target.length == 64 }
+
+  fun docUrl(): String = "https://raw.githubusercontent.com/" + REPO + "/main/authority/manifiesto.pdf"
 
   fun hidesComment(pid: String, cid: String): Boolean =
     all().any { it.type == "COMMENT_REMOVE" && it.target == pid && it.arg == cid && active(it) }
