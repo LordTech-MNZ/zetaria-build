@@ -80,6 +80,11 @@ jobs:
             ls src/scripts 2>/dev/null | head -50
             grep -rliE "ios" src/scripts 2>/dev/null | head -20
             echo
+            for f in download-libs.sh prepare.sh; do
+              echo "== scripts/ios/$f =="
+              head -n 80 "src/scripts/ios/$f" 2>/dev/null || echo "(no existe)"
+              echo
+            done
             echo "== Archivos de la Release oficial ${TAG} =="
             gh release view "$TAG" --repo simplex-chat/simplex-chat --json assets --jq '.assets[] | "\(.size)\t\(.name)"' 2>&1 | head -80
           } > out/zetaria-ios-core-check.txt 2>&1
@@ -126,6 +131,7 @@ jobs:
           lfs: true
           sparse-checkout: |
             apps/ios
+            scripts
 
       - uses: actions/setup-python@v5
         with:
@@ -138,16 +144,29 @@ jobs:
           pip install pillow
           python3 overlay/ios/ios_rebrand.py src/apps/ios overlay/.github/workflows/branding/zetaria_icon.png
 
+      - name: Descargar el núcleo de iOS (script oficial de SimpleX)
+        # Intento: el script se ejecuta sin argumentos. Si necesita alguno, su ayuda queda en el log.
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p out
+          cd src
+          echo "== contenido de scripts/ios/download-libs.sh =="
+          sed -n 1,80p scripts/ios/download-libs.sh
+          echo "== ejecutando =="
+          bash scripts/ios/download-libs.sh 2>&1 | tee ../out/download-libs.log
+
       - name: Comprobar que el núcleo nativo (Haskell) está en el repo
         shell: bash
         run: |
           xcodebuild -version
           cd src/apps/ios
           echo "== Libraries =="; ls -la Libraries 2>/dev/null || echo "(no existe apps/ios/Libraries)"
-          N=$(find Libraries -maxdepth 2 -name '*.a' -size +1M 2>/dev/null | wc -l | tr -d ' ')
-          echo "Librerías .a grandes encontradas: $N"
+          find . -name 'libHS*.a' -size +1M 2>/dev/null | head -5
+          N=$(find . -name 'libHS*.a' -size +1M 2>/dev/null | wc -l | tr -d ' ')
+          echo "Librerías del núcleo (libHS*.a) encontradas: $N"
           if [ "$N" -eq 0 ]; then
-            echo "::error::En este tag, apps/ios/Libraries no trae las librerías compiladas del núcleo (*.a). Sin ellas no se puede enlazar la app; habría que obtenerlas o compilarlas aparte. Revisa zetaria-ios-core-check.txt."
+            echo "::error::Tras ejecutar download-libs.sh sigue sin haber librerías del núcleo (libHS*.a). Mira out/download-libs.log en el artefacto zetaria-ios-ipa."
             exit 1
           fi
           echo "== Proyectos y esquemas =="
@@ -202,6 +221,7 @@ jobs:
           name: zetaria-ios-ipa
           path: |
             out/*.ipa
+            out/*.log
             ${{ runner.temp }}/xcodebuild.log
           if-no-files-found: warn
           retention-days: 7
