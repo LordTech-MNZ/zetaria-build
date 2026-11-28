@@ -30,6 +30,7 @@ from PIL import Image
 APP_NAME = "Zetaria"
 OLD_ID = "chat.simplex.app"
 NEW_ID = "app.zetaria.chat"
+OLD_TEAM = "5NN7GUYB6T"  # Team ID de Apple de SimpleX; viene fijado en KeyChain.swift y en el .pbxproj
 ICON_BG = (40, 12, 60)  # mismo morado oscuro que el ícono adaptativo de Android
 
 # chat.simplex.app, chat.simplex.app.SimpleX-NSE, group.chat.simplex.app ...
@@ -38,7 +39,7 @@ ID_RE = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(OLD_ID) + r"(?![A-Za-z0-9_]
 CONFIG_SUFFIXES = {".pbxproj", ".entitlements", ".plist", ".xcconfig"}
 SKIP_DIRS = {".git", "build", "DerivedData", "Pods", "node_modules"}
 
-report = {"ids": {}, "swift_ids": {}, "display_name": {}, "icons": [], "team": {}, "warnings": []}
+report = {"ids": {}, "swift_ids": {}, "display_name": {}, "icons": [], "team": {}, "team_left": {}, "warnings": []}
 
 
 def walk(root: Path):
@@ -160,21 +161,25 @@ def step_icons(root: Path, icon_path: Path):
 # ---------------------------------------------------------------- 4. equipo de Apple (opcional)
 def step_team(root: Path):
     team = os.environ.get("ZETARIA_APPLE_TEAM", "").strip()
-    if not team:
-        return
-    if not re.fullmatch(r"[A-Z0-9]{10}", team):
+    if team and not re.fullmatch(r"[A-Z0-9]{10}", team):
         report["warnings"].append("ZETARIA_APPLE_TEAM no parece un Team ID (10 caracteres A-Z/0-9); se ignora")
-        return
+        team = ""
     for p in walk(root):
-        if p.suffix != ".pbxproj":
+        if p.suffix not in CONFIG_SUFFIXES | {".swift"}:
             continue
         text = read(p)
-        if text is None:
+        if text is None or (OLD_TEAM not in text and "DEVELOPMENT_TEAM" not in text):
             continue
-        new, n = re.subn(r"(DEVELOPMENT_TEAM\s*=\s*)[A-Z0-9]{10}(;)", r"\g<1>" + team + r"\2", text)
-        if n:
-            p.write_text(new, encoding="utf-8")
-            report["team"][rel(p, root)] = n
+        if team:
+            new, n = text, 0
+            if p.suffix == ".pbxproj":
+                new, n = re.subn(r"(DEVELOPMENT_TEAM\s*=\s*)[A-Z0-9]{10}(;)", r"\g<1>" + team + r"\2", new)
+            new, n2 = re.subn(re.escape(OLD_TEAM), team, new)   # p. ej. ACCESS_GROUP en KeyChain.swift
+            if n + n2:
+                p.write_text(new, encoding="utf-8")
+                report["team"][rel(p, root)] = n + n2
+        elif OLD_TEAM in text:
+            report["team_left"][rel(p, root)] = text.count(OLD_TEAM)
 
 
 # ---------------------------------------------------------------- informe
@@ -216,7 +221,12 @@ def main():
     lines.append(f"Íconos regenerados: {len(report['icons'])}")
     lines += [f"   {i}" for i in report["icons"]]
     if report["team"]:
-        lines.append(f"DEVELOPMENT_TEAM actualizado en: {', '.join(report['team'])}")
+        lines.append(f"Team ID de Apple -> el tuyo: {sum(report['team'].values())} cambios en {len(report['team'])} archivos")
+        lines += [f"   {k}: {v}" for k, v in sorted(report["team"].items())]
+    if report["team_left"]:
+        lines.append(f"AVISO: quedan {sum(report['team_left'].values())} referencias al Team ID de SimpleX ({OLD_TEAM}) en "
+                     f"{', '.join(sorted(report['team_left']))}. Define ZETARIA_APPLE_TEAM con tu Team ID; "
+                     "si no, la app no podrá guardar la clave de la base de datos en el llavero.")
     if left:
         lines.append("OJO, quedan referencias a chat.simplex.app (revisar a mano):")
         lines += [f"   {k}: {v}" for k, v in sorted(left.items())]

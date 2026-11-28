@@ -39,17 +39,47 @@ jobs:
           repository: simplex-chat/simplex-chat
           ref: ${{ inputs.tag }}
           path: src
-          sparse-checkout: apps/ios
+          sparse-checkout: |
+            apps/ios
+            scripts
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Aplicar marca Zetaria (iOS)
+        env:
+          # Opcional: tu Team ID de Apple (Settings > Secrets and variables > Actions > Variables).
+          # Sin él, el rebrand avisa de que queda el Team ID de SimpleX.
+          ZETARIA_APPLE_TEAM: ${{ vars.ZETARIA_APPLE_TEAM }}
         run: |
           pip install pillow
           test -d src/apps/ios || { echo "::error::No existe apps/ios en el tag ${{ inputs.tag }}"; exit 1; }
           python3 overlay/ios/ios_rebrand.py src/apps/ios overlay/.github/workflows/branding/zetaria_icon.png
+
+      - name: ¿De dónde sale el núcleo nativo de iOS? (solo lectura)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p out
+          {
+            echo "== Carpeta apps/ios/Libraries =="
+            ls -la src/apps/ios/Libraries 2>/dev/null || echo "(no existe)"
+            echo
+            echo "== Librerías que enlaza el proyecto Xcode =="
+            grep -oE "lib[A-Za-z0-9_+-]*(simplex|HS)[A-Za-z0-9_.+-]*" src/apps/ios/SimpleX.xcodeproj/project.pbxproj | sort -u | head -40
+            echo
+            echo "== Scripts del repo que mencionan iOS =="
+            ls src/scripts 2>/dev/null | head -50
+            grep -rliE "ios" src/scripts 2>/dev/null | head -20
+            echo
+            echo "== Archivos de la Release oficial ${TAG} =="
+            gh release view "$TAG" --repo simplex-chat/simplex-chat --json assets --jq '.assets[] | "\(.size)\t\(.name)"' 2>&1 | head -80
+          } > out/zetaria-ios-core-check.txt 2>&1
+          cat out/zetaria-ios-core-check.txt
 
       - name: Resumen de cambios
         if: always()
