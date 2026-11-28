@@ -1,4 +1,4 @@
-name: Zetaria iOS - revisar rebrand (sin compilar)
+name: Zetaria iOS - rebrand e .ipa sin firmar
 
 # ETAPA 1 (esta): aplica la marca Zetaria sobre el código iOS de SimpleX y sube el
 # resultado como artefacto para que lo revises. NO compila, NO firma, NO publica nada.
@@ -15,6 +15,10 @@ on:
         description: "Tag de SimpleX a usar como base (el mismo que en Android)"
         default: "v7.0.3"
         required: true
+      build_ipa:
+        description: "Además, intentar compilar un .ipa SIN FIRMAR (macOS, tarda; falla pronto si falta el núcleo de iOS)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -97,3 +101,108 @@ jobs:
           name: zetaria-ios-rebrand
           path: out/
           retention-days: 7
+
+  # ------------------------------------------------------------------------------------
+  # INTENTO de .ipa sin firmar. Solo corre si marcas "build_ipa" y si el rebrand salió OK.
+  # No publica Releases (Android no se entera): deja el .ipa como artefacto descargable.
+  # ------------------------------------------------------------------------------------
+  build-ipa:
+    if: ${{ inputs.build_ipa }}
+    needs: rebrand-check
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Tu repo (branding + scripts)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Código iOS de SimpleX en el tag elegido
+        uses: actions/checkout@v4
+        with:
+          repository: simplex-chat/simplex-chat
+          ref: ${{ inputs.tag }}
+          path: src
+          lfs: true
+          sparse-checkout: |
+            apps/ios
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Aplicar marca Zetaria (iOS)
+        env:
+          ZETARIA_APPLE_TEAM: ${{ vars.ZETARIA_APPLE_TEAM }}
+        run: |
+          pip install pillow
+          python3 overlay/ios/ios_rebrand.py src/apps/ios overlay/.github/workflows/branding/zetaria_icon.png
+
+      - name: Comprobar que el núcleo nativo (Haskell) está en el repo
+        shell: bash
+        run: |
+          xcodebuild -version
+          cd src/apps/ios
+          echo "== Libraries =="; ls -la Libraries 2>/dev/null || echo "(no existe apps/ios/Libraries)"
+          N=$(find Libraries -maxdepth 2 -name '*.a' -size +1M 2>/dev/null | wc -l | tr -d ' ')
+          echo "Librerías .a grandes encontradas: $N"
+          if [ "$N" -eq 0 ]; then
+            echo "::error::En este tag, apps/ios/Libraries no trae las librerías compiladas del núcleo (*.a). Sin ellas no se puede enlazar la app; habría que obtenerlas o compilarlas aparte. Revisa zetaria-ios-core-check.txt."
+            exit 1
+          fi
+          echo "== Proyectos y esquemas =="
+          xcodebuild -list -project SimpleX.xcodeproj || true
+
+      - name: Compilar sin firmar
+        shell: bash
+        run: |
+          set -o pipefail
+          cd src/apps/ios
+          xcodebuild build \
+            -project SimpleX.xcodeproj \
+            -scheme "SimpleX (iOS)" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | tail -n 60
+
+      - name: Empaquetar .ipa sin firmar
+        shell: bash
+        run: |
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP" || { echo "::error::No se generó ninguna .app"; exit 1; }
+          echo "App: $APP"
+          mkdir -p out ipa/Payload
+          cp -R "$APP" ipa/Payload/
+          (cd ipa && zip -qry ../out/Zetaria-sin-firmar.ipa Payload)
+          ls -la out
+
+      - name: Variante pseudo-firmada con entitlements (opcional, para probar)
+        # Sin firma, la app pierde sus entitlements (grupo de datos, llavero) y puede cerrarse al abrir.
+        # Esto incrusta los entitlements con ldid; los instaladores como Sideloadly/AltStore la vuelven a firmar.
+        continue-on-error: true
+        shell: bash
+        run: |
+          brew install ldid
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
+          rm -rf ipa2 && mkdir -p ipa2/Payload && cp -R "$APP" ipa2/Payload/
+          for B in ipa2/Payload/*.app ipa2/Payload/*.app/PlugIns/*.appex; do
+            NAME=$(basename "$B")
+            X=$(find "$RUNNER_TEMP/dd/Build/Intermediates.noindex" -name "${NAME}.xcent" | head -1)
+            EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$B/Info.plist")
+            if [ -n "$X" ]; then ldid -S"$X" "$B/$EXE" && echo "pseudo-firmado: $NAME"; else echo "sin .xcent para: $NAME"; fi
+          done
+          (cd ipa2 && zip -qry ../out/Zetaria-pseudofirmado.ipa Payload)
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zetaria-ios-ipa
+          path: |
+            out/*.ipa
+            ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 7
+
