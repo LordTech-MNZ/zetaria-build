@@ -80,7 +80,7 @@ jobs:
             ls src/scripts 2>/dev/null | head -50
             grep -rliE "ios" src/scripts 2>/dev/null | head -20
             echo
-            for f in download-libs.sh prepare.sh; do
+            for f in download-libs.sh prepare.sh prepare-x86_64.sh; do
               echo "== scripts/ios/$f =="
               head -n 80 "src/scripts/ios/$f" 2>/dev/null || echo "(no existe)"
               echo
@@ -89,6 +89,77 @@ jobs:
             gh release view "$TAG" --repo simplex-chat/simplex-chat --json assets --jq '.assets[] | "\(.size)\t\(.name)"' 2>&1 | head -80
           } > out/zetaria-ios-core-check.txt 2>&1
           cat out/zetaria-ios-core-check.txt
+
+      - name: Buscar el servidor de compilaciones del núcleo (solo lectura)
+        # No modifica nada: lista proyectos/jobsets del servidor Hydra que usa SimpleX,
+        # prueba las descargas posibles y lista el contenido del zip (así se ve la versión del núcleo).
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          {
+            echo "== Dónde espera Xcode las librerías =="
+            grep -nE "LIBRARY_SEARCH_PATHS|Libraries" src/apps/ios/SimpleX.xcodeproj/project.pbxproj | head -20
+            echo
+            python3 - <<'PY'
+          import json, subprocess, urllib.request, urllib.parse
+
+          HY = "https://ci.zw3rk.com"
+          JOB = "aarch64-darwin.aarch64-darwin-ios:lib:simplex-chat"
+
+          def get(path):
+              req = urllib.request.Request(HY + path, headers={"Accept": "application/json"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          def names(x):
+              out = []
+              for e in (x if isinstance(x, list) else list(x.keys()) if isinstance(x, dict) else []):
+                  out.append(e if isinstance(e, str) else (e.get("name") or e.get("id") or str(e)[:60]))
+              return out
+
+          try:
+              root = get("/")
+          except Exception as e:
+              print("No pude leer", HY, "->", e)
+              raise SystemExit
+          projs = names(root)
+          print("== Proyectos en", HY, "==")
+          print(", ".join(projs[:60]) or "(ninguno)")
+          cands = []
+          for pr in projs:
+              if not any(k in pr.lower() for k in ("simplex", "zw3rk")):
+                  continue
+              try:
+                  info = get("/project/" + urllib.parse.quote(pr))
+              except Exception as e:
+                  print("proyecto", pr, "-> error", e)
+                  continue
+              sets = names(info.get("jobsets", []))
+              print("\n== Proyecto", pr, "| jobsets:", ", ".join(sets) or "(ninguno)")
+              for js in sets:
+                  cands.append((pr, js))
+
+          print("\n== Probando descargas del núcleo de iOS ==")
+          ok = []
+          for pr, js in cands:
+              url = f"{HY}/job/{pr}/{js}/{JOB}/latest/download/1"
+              req = urllib.request.Request(url, method="HEAD")
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      size = r.headers.get("Content-Length")
+                      print(f"OK   {pr}/{js}  HTTP {r.status}  tamaño {size}")
+                      ok.append((pr, js, url))
+              except Exception as e:
+                  print(f"NO   {pr}/{js}  {str(e)[:70]}")
+
+          for pr, js, url in ok[:3]:
+              print(f"\n== Contenido del zip de {pr}/{js} ==")
+              subprocess.run(["curl", "-sSL", "--tlsv1.2", "-m", "600", "-o", "/tmp/core.zip", url])
+              subprocess.run("unzip -l /tmp/core.zip | head -30", shell=True)
+          PY
+          } > out/zetaria-ios-hydra-check.txt 2>&1
+          cat out/zetaria-ios-hydra-check.txt
 
       - name: Resumen de cambios
         if: always()
