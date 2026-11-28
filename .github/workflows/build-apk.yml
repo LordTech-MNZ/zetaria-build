@@ -11,6 +11,8 @@ on:
       - ".github/workflows/dump-source.yml"
       - ".github/workflows/test-keystore.yml"
       - "authority/**"
+      - "ios/**"
+      - ".github/workflows/build-ios.yml"
   workflow_dispatch:
     inputs:
       tag:

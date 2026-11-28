@@ -1,0 +1,69 @@
+name: Zetaria iOS - revisar rebrand (sin compilar)
+
+# ETAPA 1 (esta): aplica la marca Zetaria sobre el código iOS de SimpleX y sube el
+# resultado como artefacto para que lo revises. NO compila, NO firma, NO publica nada.
+#
+# Aislado de Android a propósito:
+#   - Solo se ejecuta a mano (workflow_dispatch); ningún push lo dispara.
+#   - permissions: contents: read  -> no puede crear Releases ni tocar "latest",
+#     que es lo que consulta el actualizador de la app de Android.
+#   - Grupo de concurrencia propio (zetaria-ios), distinto de zetaria-build.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de SimpleX a usar como base (el mismo que en Android)"
+        default: "v7.0.3"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zetaria-ios
+  cancel-in-progress: true
+
+jobs:
+  rebrand-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Tu repo (branding + scripts)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Código iOS de SimpleX en el tag elegido
+        uses: actions/checkout@v4
+        with:
+          repository: simplex-chat/simplex-chat
+          ref: ${{ inputs.tag }}
+          path: src
+          sparse-checkout: apps/ios
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Aplicar marca Zetaria (iOS)
+        run: |
+          pip install pillow
+          test -d src/apps/ios || { echo "::error::No existe apps/ios en el tag ${{ inputs.tag }}"; exit 1; }
+          python3 overlay/ios/ios_rebrand.py src/apps/ios overlay/.github/workflows/branding/zetaria_icon.png
+
+      - name: Resumen de cambios
+        if: always()
+        run: |
+          git -C src add -A
+          git -C src diff --cached --stat | tail -40 || true
+          mkdir -p out
+          git -C src diff --cached --binary -- apps/ios > out/zetaria-ios-rebrand.patch || true
+          cp -f src/apps/zetaria-ios-report.txt out/ 2>/dev/null || true
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zetaria-ios-rebrand
+          path: out/
+          retention-days: 7
